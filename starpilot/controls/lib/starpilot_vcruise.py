@@ -26,6 +26,11 @@ FT_TO_M = 0.3048
 OFFSET_FT_MIN = -20
 OFFSET_FT_MAX = 20
 
+# Lead speed below which a raw (unfiltered) lead blocks Force Stop activation.
+# Keeps cross-traffic and fast ghost leads from suppressing Force Stop; only true
+# slow/stopped leads (the ones ACC should handle) qualify.
+SLOW_LEAD_MS = 3.0  # ~7 mph
+
 # Seconds stop_light_detected must stay false at standstill before auto-releasing
 # a Force Stop hold. Guards against brief model dropouts on a still-red light.
 GREEN_LIGHT_CONFIRM_TIME = 1.5
@@ -70,13 +75,13 @@ class StarPilotVCruise:
     long_control_active = sm["carControl"].longActive
 
     # ----- Activation paths -----
-    # Raw lead check: block Force Stop as soon as a relevant lead is present, without
-    # waiting for the tracking_lead filter (~1s ramp). Without this, Force Stop can latch
-    # during the filter's settling window and stay committed for the whole stop.
+    # Raw lead check: block Force Stop when a slow/stopped lead is present, without
+    # waiting for the tracking_lead filter (~1s ramp). Keyed on vLead < SLOW_LEAD_MS so
+    # cross-traffic or ghost leads moving at speed don't suppress Force Stop activation.
     lead = self.starpilot_planner.lead_one
     lead_present = (bool(getattr(lead, "status", False))
                     and float(getattr(lead, "dRel", float("inf"))) < ACTIVATION_M
-                    and float(getattr(lead, "vLead", float("inf"))) < v_ego + 2.0)
+                    and float(getattr(lead, "vLead", float("inf"))) < SLOW_LEAD_MS)
 
     # CEM/model path: model predicted stop within ACTIVATION_M.
     # Exclude when a lead is present (raw or filtered) — the handoff_to_stopped_lead path
