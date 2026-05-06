@@ -131,10 +131,12 @@ class StarPilotVCruise:
 
     # Green-light auto-override: if Force Stop is active for a light (not a sign) and
     # stop_light_detected clears for GREEN_LIGHT_CONFIRM_TIME, release automatically.
-    # Runs whether decelerating or at standstill so a green light at 5 mph also cancels.
+    # Only runs at low speed so a mid-approach model dropout can't cancel Force Stop
+    # while the car is still traveling at speed toward the line.
     # Signs are excluded — they never turn green.
     stop_light_still_detected = self.starpilot_planner.starpilot_cem.stop_light_detected
-    if force_stop_enabled and not self.stop_sign_confirmed and not stop_light_still_detected:
+    near_stopped = v_ego < 3.0  # ~7 mph — safe speed to release from
+    if force_stop_enabled and near_stopped and not self.stop_sign_confirmed and not stop_light_still_detected:
       self.green_light_timer = min(self.green_light_timer + DT_MDL, GREEN_LIGHT_CONFIRM_TIME)
     else:
       self.green_light_timer = 0.0
