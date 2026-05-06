@@ -395,7 +395,23 @@ def longitudinal_maneuver_alert(CP: car.CarParams, CS: car.CarState, sm: messagi
                Priority.LOW, VisualAlert.none, audible_alert, 0.2)
 
 
+def turning_alert(direction: str):
+  def func(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality, starpilot_toggles: SimpleNamespace) -> Alert:
+    if starpilot_toggles.hide_turning_banner:
+      return EmptyAlert
+    return Alert(f"Turning {direction}", "", AlertStatus.normal, AlertSize.small, Priority.LOWEST, VisualAlert.none, AudibleAlert.none, .1)
+  return func
+
+
+def changing_lanes_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality, starpilot_toggles: SimpleNamespace) -> Alert:
+  if starpilot_toggles.hide_changing_lanes_banner:
+    return EmptyAlert
+  return Alert("Changing Lanes", "", AlertStatus.normal, AlertSize.small, Priority.LOW, VisualAlert.none, AudibleAlert.none, .1)
+
+
 def personality_changed_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality, starpilot_toggles: SimpleNamespace) -> Alert:
+  if starpilot_toggles.hide_distance_profile_banner:
+    return EmptyAlert
   personality = str(personality).title()
   return NormalPermanentAlert(f"Driving Personality: {personality}", duration=1.5)
 
@@ -697,11 +713,7 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
   },
 
   EventName.laneChange: {
-    ET.WARNING: Alert(
-      "Changing Lanes",
-      "",
-      AlertStatus.normal, AlertSize.small,
-      Priority.LOW, VisualAlert.none, AudibleAlert.none, .1),
+    ET.WARNING: changing_lanes_alert,
   },
 
   EventName.steerSaturated: {
@@ -1241,19 +1253,11 @@ STARPILOT_EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
   },
 
   StarPilotEventName.turningLeft: {
-    ET.WARNING: Alert(
-      "Turning Left",
-      "",
-      AlertStatus.normal, AlertSize.small,
-      Priority.LOWEST, VisualAlert.none, AudibleAlert.none, .1),
+    ET.WARNING: turning_alert("Left"),
   },
 
   StarPilotEventName.turningRight: {
-    ET.WARNING: Alert(
-      "Turning Right",
-      "",
-      AlertStatus.normal, AlertSize.small,
-      Priority.LOWEST, VisualAlert.none, AudibleAlert.none, .1),
+    ET.WARNING: turning_alert("Right"),
   },
 
   # Random Events
