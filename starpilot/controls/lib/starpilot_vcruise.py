@@ -26,10 +26,6 @@ FT_TO_M = 0.3048
 OFFSET_FT_MIN = -20
 OFFSET_FT_MAX = 20
 
-# Seconds stop_light_detected must stay false at standstill before auto-releasing
-# a Force Stop hold. Guards against brief model dropouts on a still-red light.
-GREEN_LIGHT_CONFIRM_TIME = 1.5
-
 
 def get_active_slc_control_target(speed_limit_controller, set_speed_limit, slc_target, slc_offset, overridden_speed, v_ego_diff):
   # `SetSpeedLimit` only controls engage-time set-speed initialization. Ongoing
@@ -62,7 +58,6 @@ class StarPilotVCruise:
     self.tracked_model_length = 0.0
 
     self.stop_sign_confirmed = False
-    self.green_light_timer = 0.0  # seconds stop_light_detected has been false at standstill
 
   # ===== Main update =====
 
@@ -123,18 +118,6 @@ class StarPilotVCruise:
     self.override_force_stop |= sm["carState"].gasPressed
     self.override_force_stop |= sm["starpilotCarState"].accelPressed
     self.override_force_stop &= force_stop_enabled
-
-    # Green-light auto-override: if Force Stop is active for a light (not a sign) and
-    # stop_light_detected clears for GREEN_LIGHT_CONFIRM_TIME, release automatically.
-    # Runs whether decelerating or at standstill so a green light at 5 mph also cancels.
-    # Signs are excluded — they never turn green.
-    stop_light_still_detected = self.starpilot_planner.starpilot_cem.stop_light_detected
-    if force_stop_enabled and not self.stop_sign_confirmed and not stop_light_still_detected:
-      self.green_light_timer = min(self.green_light_timer + DT_MDL, GREEN_LIGHT_CONFIRM_TIME)
-    else:
-      self.green_light_timer = 0.0
-    if self.green_light_timer >= GREEN_LIGHT_CONFIRM_TIME:
-      self.override_force_stop = True
 
     if self.override_force_stop:
       self.override_force_stop_timer = OVERRIDE_FORCE_STOP_TIMER
