@@ -182,6 +182,12 @@ class CarInterfaceBase(ABC):
     ret.rotationalInertia = scale_rot_inertia(ret.mass, ret.wheelbase)
     ret.tireStiffnessFront, ret.tireStiffnessRear = scale_tire_stiffness(ret.mass, ret.wheelbase, ret.centerToFront, ret.tireStiffnessFactor)
 
+    # Manual EPS_MODIFIED override for Civic Bosch variants whose modded firmware
+    # doesn't follow the comma-byte convention (e.g., TBA-C120 binary mods that
+    # leave the EPS fw version string identical to stock).
+    if candidate == HONDA.HONDA_CIVIC_BOSCH and getattr(starpilot_toggles, "honda_eps_clamp_released", False):
+      ret.flags |= HondaFlags.EPS_MODIFIED.value
+
     toggles_to_check = ("force_torque_controller", "nnff", "nnff_lite")
     modified_civic_force_torque = (
       candidate == HONDA.HONDA_CIVIC_BOSCH and
