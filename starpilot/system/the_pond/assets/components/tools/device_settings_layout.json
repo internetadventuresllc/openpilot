@@ -90,6 +90,14 @@
         "parent_key": "AdvancedLateralTune"
       },
       {
+        "key": "HondaEPSClampReleased",
+        "label": "Honda EPS Modified Override",
+        "description": "Manually flag the EPS firmware as modified for Honda Civic Bosch with torque-clamp-released firmware whose version string does not follow the comma-byte convention (e.g. TBA-C120 binary mods that leave the version string identical to stock). Equivalent to the auto-detected EPS_MODIFIED flag — switches to torque controller and unlocks the friction slider. Reboot required.",
+        "data_type": "bool",
+        "ui_type": "toggle",
+        "parent_key": "AdvancedLateralTune"
+      },
+      {
         "key": "AlwaysOnLateral",
         "label": "Always On Lateral",
         "description": "openpilot's steering remains active even when the accelerator or brake pedals are pressed.",

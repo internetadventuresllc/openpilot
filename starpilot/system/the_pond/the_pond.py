@@ -1987,6 +1987,12 @@ def _get_param_type_info():
         _cached_allowed_keys.add(alias_key)
         types[alias_key] = types.get(real_key, str)
 
+    # Register HondaEPSClampReleased — added in keys.h but not yet in
+    # starpilot_default_params; the_pond's allowed_keys is built from
+    # starpilot_default_params so without this the toggle is rejected.
+    _cached_allowed_keys.add("HondaEPSClampReleased")
+    types["HondaEPSClampReleased"] = bool
+
     _cached_param_types = types
   return _cached_allowed_keys, _cached_param_types
 
