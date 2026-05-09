@@ -979,6 +979,31 @@ class StarPilotCurveSpeedLayout(_SettingsPage):
                    action_danger=True,
                    on_click=lambda: self._reset_curve_data(),
                    visible=csc_on),
+        SettingRow("LowSpeedTurnSpeedController", "toggle", tr_noop("Low-Speed Turn Speed Controller"),
+                   subtitle=tr_noop("Slow down during low-speed turns (5-25 mph) when steering torque approaches saturation."),
+                   get_state=lambda: self._params.get_bool("LowSpeedTurnSpeedController"),
+                   set_state=lambda s: self._params.put_bool("LowSpeedTurnSpeedController", s)),
+        SettingRow("LSTSCCalibrateMode", "toggle", tr_noop("Calibrate Low-Speed Turns (AOL)"),
+                   subtitle=tr_noop("Drive low-speed turns yourself with AOL active to teach safe speeds. Disables LSTSC longitudinal intervention while on."),
+                   get_state=lambda: self._params.get_bool("LSTSCCalibrateMode"),
+                   set_state=lambda s: self._params.put_bool("LSTSCCalibrateMode", s),
+                   visible=lambda: self._params.get_bool("LowSpeedTurnSpeedController")),
+        SettingRow("ShowLSTSCStatus", "toggle", tr_noop("Show LSTSC Status"),
+                   subtitle=tr_noop("Show the Low-Speed Turn Speed Controller status indicator on the driving screen."),
+                   get_state=lambda: self._params.get_bool("ShowLSTSCStatus"),
+                   set_state=lambda s: self._params.put_bool("ShowLSTSCStatus", s),
+                   visible=lambda: self._params.get_bool("LowSpeedTurnSpeedController")),
+        SettingRow("LSTSCCalibrationProgress", "value", tr_noop("LSTSC Calibration Progress"),
+                   subtitle=tr_noop("How much low-speed torque data has been collected per visited steering angle."),
+                   get_value=lambda: f"{self._params_memory.get_float('LowSpeedTurnCalibrationProgress'):.2f}%",
+                   on_click=None,
+                   visible=lambda: self._params.get_bool("LowSpeedTurnSpeedController")),
+        SettingRow("ResetLSTSC", "action", tr_noop("Reset Low-Speed Turn Data"),
+                   subtitle=tr_noop("Reset collected torque data for the Low-Speed Turn Speed Controller."),
+                   action_text=tr_noop("Reset"),
+                   action_danger=True,
+                   on_click=lambda: self._reset_lstsc_data(),
+                   visible=lambda: self._params.get_bool("LowSpeedTurnSpeedController")),
       ]),
     ]
     self._manager_view = AetherSettingsView(
@@ -995,6 +1020,14 @@ class StarPilotCurveSpeedLayout(_SettingsPage):
         self._params.remove("CurvatureData")
 
     gui_app.push_widget(ConfirmDialog(tr_noop("Reset Curve Data?"), tr_noop("Confirm"), callback=on_close))
+
+  def _reset_lstsc_data(self):
+    def on_close(res):
+      if res == DialogResult.CONFIRM:
+        self._params.remove("LowSpeedTurnCalibrationProgress")
+        self._params.remove("LowSpeedTurnTorqueData")
+
+    gui_app.push_widget(ConfirmDialog(tr_noop("Reset Low-Speed Turn Data?"), tr_noop("Confirm"), callback=on_close))
 
 
 # ═══════════════════════════════════════════════════════════════
