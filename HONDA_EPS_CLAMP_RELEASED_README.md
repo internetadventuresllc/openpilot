@@ -1,8 +1,8 @@
 # StarPilot Dom — Civic Bosch EPS Clamp Released v1
 
-**Branch:** `Dom-civic-clamp-released-v1`
+**Branch:** `Dom-clamp`
 **Base:** firestar5683/openpilot Dom
-**Fork:** internetadventuresllc/StarPilot
+**Fork:** internetadventuresllc/openpilot
 
 ## What this branch adds
 
@@ -59,7 +59,7 @@ Sets:
 1. On the comma device, go to **Settings → Software → Add Custom Software**
 2. Use the install URL pattern for this fork's branch:
    ```
-   https://github.com/internetadventuresllc/StarPilot/tree/Dom-civic-clamp-released-v1
+   https://github.com/internetadventuresllc/openpilot/tree/Dom-clamp
    ```
    Or via the comma installer URL pattern (depends on your device's installer flow — see your device's docs for "Add Custom Software").
 3. Wait for download and install
