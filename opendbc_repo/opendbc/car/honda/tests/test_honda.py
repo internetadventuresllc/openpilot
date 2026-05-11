@@ -74,38 +74,69 @@ class TestHondaFingerprint:
     assert get_honda_bosch_wind_brake_mps2(40.2) == pytest.approx(0.441)
 
   def test_honda_bosch_live_learning_increases_factors_when_under_accelerating(self):
-    gas_factor, wind_factor, wind_factor_before_brake = update_honda_bosch_live_learning(
+    gas_factor, wind_factor, wind_factor_before_brake, gas_factor_before_gasmax, wind_factor_before_gasmax = update_honda_bosch_live_learning(
       1.0,
       1.0,
       0.0,
+      1.0,
+      1.0,
       desired_accel=1.0,
       actual_accel=0.5,
       gas_pedal_force=1.2,
       wind_brake_mps2=0.136,
       brake_pressed=False,
       v_ego=22.4,
+      accel_max=2.0,
     )
 
     assert gas_factor == pytest.approx(1.012)
     assert wind_factor == pytest.approx(1.000136)
     assert wind_factor_before_brake == pytest.approx(wind_factor)
+    assert gas_factor_before_gasmax == pytest.approx(gas_factor)
+    assert wind_factor_before_gasmax == pytest.approx(wind_factor)
 
   def test_honda_bosch_live_learning_restores_wind_factor_while_braking(self):
-    gas_factor, wind_factor, wind_factor_before_brake = update_honda_bosch_live_learning(
+    gas_factor, wind_factor, wind_factor_before_brake, gas_factor_before_gasmax, wind_factor_before_gasmax = update_honda_bosch_live_learning(
       1.4,
       1.1,
       1.3,
+      1.4,
+      1.1,
       desired_accel=-0.2,
       actual_accel=0.0,
       gas_pedal_force=-0.1,
       wind_brake_mps2=0.136,
       brake_pressed=True,
       v_ego=22.4,
+      accel_max=2.0,
     )
 
     assert gas_factor == pytest.approx(1.4)
     assert wind_factor == pytest.approx(1.3)
     assert wind_factor_before_brake == pytest.approx(1.3)
+
+  def test_honda_bosch_live_learning_saturation_guard_prevents_factor_growth_at_accel_max(self):
+    # gas_pedal_force >= accel_max: factors must NOT increase above the _before_gasmax snapshot
+    gas_factor, wind_factor, _, gas_factor_before_gasmax, wind_factor_before_gasmax = update_honda_bosch_live_learning(
+      1.0,
+      1.0,
+      0.0,
+      1.0,
+      1.0,
+      desired_accel=2.0,
+      actual_accel=1.0,
+      gas_pedal_force=2.5,  # >= accel_max=2.0, saturated
+      wind_brake_mps2=0.136,
+      brake_pressed=False,
+      v_ego=22.4,
+      accel_max=2.0,
+    )
+
+    # Under saturation, the snapshot (1.0) caps the factors; learner cannot grow them above 1.0
+    assert gas_factor == pytest.approx(1.0)
+    assert wind_factor <= pytest.approx(1.0)
+    assert gas_factor_before_gasmax == pytest.approx(1.0)
+    assert wind_factor_before_gasmax == pytest.approx(1.0)
 
   def test_official_modified_eps_firmwares_restored(self):
     assert b'39990-TVA,A150\x00\x00' in FW_VERSIONS[CAR.HONDA_ACCORD][(CarParams.Ecu.eps, 0x18DA30F1, None)]

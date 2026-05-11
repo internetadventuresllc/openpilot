@@ -1,6 +1,7 @@
 import math
 import numpy as np
 
+from openpilot.common.params import Params
 from opendbc.can import CANPacker
 from opendbc.car import ACCELERATION_DUE_TO_GRAVITY, Bus, DT_CTRL, rate_limit, make_tester_present_msg, structs
 from opendbc.car.honda import hondacan
@@ -97,13 +98,16 @@ def update_honda_bosch_live_learning(
   gas_factor: float,
   wind_factor: float,
   wind_factor_before_brake: float,
+  gas_factor_before_gasmax: float,
+  wind_factor_before_gasmax: float,
   desired_accel: float,
   actual_accel: float,
   gas_pedal_force: float,
   wind_brake_mps2: float,
   brake_pressed: bool,
   v_ego: float,
-) -> tuple[float, float, float]:
+  accel_max: float,
+) -> tuple[float, float, float, float, float]:
   accel_error = desired_accel - actual_accel
 
   if accel_error != 0.0 and gas_pedal_force > 0.0:
@@ -121,7 +125,14 @@ def update_honda_bosch_live_learning(
   else:
     wind_factor_before_brake = wind_factor
 
-  return gas_factor, wind_factor, wind_factor_before_brake
+  if gas_pedal_force >= accel_max:
+    gas_factor = min(gas_factor, gas_factor_before_gasmax)
+    wind_factor = min(wind_factor, wind_factor_before_gasmax)
+  else:
+    gas_factor_before_gasmax = gas_factor
+    wind_factor_before_gasmax = wind_factor
+
+  return gas_factor, wind_factor, wind_factor_before_brake, gas_factor_before_gasmax, wind_factor_before_gasmax
 
 
 def compute_gb_honda_bosch(accel, speed):
@@ -225,9 +236,23 @@ class CarController(CarControllerBase):
     self.prev_torque_cmd = 0.0
     self.steering_pressed_filter_s = 0.0
     self.steering_pressed_robust_prev = False
-    self.bosch_gas_factor = 1.0
-    self.bosch_wind_factor = 1.0
-    self.bosch_wind_factor_before_brake = 0.0
+    self._params = Params()
+    try:
+      raw_gas = self._params.get("HondaGasFactorParams")
+      raw_wind = self._params.get("HondaWindFactorParams")
+    except Exception:
+      # Pond two-gate model: if the C++ params daemon binary hasn't been rebuilt
+      # with the new keys yet, get() raises UnknownKeyName. Fall back to defaults
+      # rather than crashing the carcontroller on first boot.
+      raw_gas = None
+      raw_wind = None
+    gas_default = raw_gas if raw_gas is not None and not math.isnan(float(raw_gas)) else 1.0
+    wind_default = raw_wind if raw_wind is not None and not math.isnan(float(raw_wind)) else 1.0
+    self.bosch_gas_factor = float(np.clip(gas_default, 0.1, 3.0))
+    self.bosch_wind_factor = float(np.clip(wind_default, 0.1, 3.0))
+    self.bosch_wind_factor_before_brake = self.bosch_wind_factor
+    self.bosch_gas_factor_before_gasmax = self.bosch_gas_factor
+    self.bosch_wind_factor_before_gasmax = self.bosch_wind_factor
     self.pitch = 0.0
 
   def _modified_civic_standard_active(self) -> bool:
@@ -351,16 +376,25 @@ class CarController(CarControllerBase):
             wind_brake_mps2 = get_honda_bosch_wind_brake_mps2(CS.out.vEgo)
             if (actuators.longControlState == LongCtrlState.pid) and (not CS.out.gasPressed):
               gas_pedal_force += wind_brake_mps2 * self.bosch_wind_factor + hill_brake
-              self.bosch_gas_factor, self.bosch_wind_factor, self.bosch_wind_factor_before_brake = update_honda_bosch_live_learning(
+              (
                 self.bosch_gas_factor,
                 self.bosch_wind_factor,
                 self.bosch_wind_factor_before_brake,
+                self.bosch_gas_factor_before_gasmax,
+                self.bosch_wind_factor_before_gasmax,
+              ) = update_honda_bosch_live_learning(
+                self.bosch_gas_factor,
+                self.bosch_wind_factor,
+                self.bosch_wind_factor_before_brake,
+                self.bosch_gas_factor_before_gasmax,
+                self.bosch_wind_factor_before_gasmax,
                 self.accel,
                 CS.out.aEgo,
                 gas_pedal_force,
                 wind_brake_mps2,
                 bool(CS.out.brakePressed),
                 CS.out.vEgo,
+                self.params.BOSCH_ACCEL_MAX,
               )
             else:
               gas_pedal_force += wind_brake_mps2 + hill_brake
@@ -419,6 +453,10 @@ class CarController(CarControllerBase):
     new_actuators.brake = self.brake
     new_actuators.torque = self.last_torque
     new_actuators.torqueOutputCan = apply_torque
+
+    if self.frame % 6000 == 0:
+      self._params.put_nonblocking("HondaGasFactorParams", str(self.bosch_gas_factor))
+      self._params.put_nonblocking("HondaWindFactorParams", str(self.bosch_wind_factor))
 
     self.frame += 1
     return new_actuators, can_sends
