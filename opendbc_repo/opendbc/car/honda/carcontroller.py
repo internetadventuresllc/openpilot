@@ -21,6 +21,23 @@ from opendbc.car.interfaces import CarControllerBase
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
 
+PARAM_SAVE_INTERVAL_FRAMES = 6000  # 60s @ 100Hz; coalesces in params async writer
+
+
+def _safe_decode_factor(raw, default: float = 1.0) -> float:
+  # Defense-in-depth: Params.get() for FLOAT keys normally returns float|None,
+  # but if a stale .so / version skew lets unparseable bytes through, isolate
+  # the conversion so it can't crash CarController construction.
+  if raw is None:
+    return default
+  try:
+    v = float(raw)
+  except (ValueError, TypeError):
+    return default
+  if math.isnan(v):
+    return default
+  return v
+
 
 def get_civic_bosch_modified_torque_lpf_tau(torque_cmd: float, prev_torque_cmd: float, v_ego: float) -> float:
   torque_delta = abs(float(torque_cmd) - float(prev_torque_cmd))
@@ -246,10 +263,8 @@ class CarController(CarControllerBase):
       # rather than crashing the carcontroller on first boot.
       raw_gas = None
       raw_wind = None
-    gas_default = raw_gas if raw_gas is not None and not math.isnan(float(raw_gas)) else 1.0
-    wind_default = raw_wind if raw_wind is not None and not math.isnan(float(raw_wind)) else 1.0
-    self.bosch_gas_factor = float(np.clip(gas_default, 0.1, 3.0))
-    self.bosch_wind_factor = float(np.clip(wind_default, 0.1, 3.0))
+    self.bosch_gas_factor = float(np.clip(_safe_decode_factor(raw_gas), 0.1, 3.0))
+    self.bosch_wind_factor = float(np.clip(_safe_decode_factor(raw_wind), 0.1, 3.0))
     self.bosch_wind_factor_before_brake = self.bosch_wind_factor
     self.bosch_gas_factor_before_gasmax = self.bosch_gas_factor
     self.bosch_wind_factor_before_gasmax = self.bosch_wind_factor
@@ -454,7 +469,7 @@ class CarController(CarControllerBase):
     new_actuators.torque = self.last_torque
     new_actuators.torqueOutputCan = apply_torque
 
-    if self.frame % 6000 == 0:
+    if self.frame % PARAM_SAVE_INTERVAL_FRAMES == 0:
       self._params.put_nonblocking("HondaGasFactorParams", str(self.bosch_gas_factor))
       self._params.put_nonblocking("HondaWindFactorParams", str(self.bosch_wind_factor))
 

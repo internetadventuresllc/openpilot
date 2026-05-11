@@ -6,6 +6,7 @@ from opendbc.car.structs import CarParams
 from opendbc.car import gen_empty_fingerprint
 from opendbc.car.honda.interface import CarInterface
 from opendbc.car.honda.carcontroller import (
+  _safe_decode_factor,
   get_civic_bosch_modified_steering_pressed,
   get_civic_bosch_modified_torque_lpf_tau,
   get_honda_bosch_wind_brake_mps2,
@@ -137,6 +138,37 @@ class TestHondaFingerprint:
     assert wind_factor <= pytest.approx(1.0)
     assert gas_factor_before_gasmax == pytest.approx(1.0)
     assert wind_factor_before_gasmax == pytest.approx(1.0)
+
+  def test_honda_bosch_live_learning_zero_gas_pedal_force_does_not_grow_gas_factor(self):
+    # gas_pedal_force = 0.0 blocks the gas-factor learning branch. The wind branch
+    # still runs (and the brake-clamp branch re-asserts wind_factor_before_brake),
+    # but gas_factor itself must stay put.
+    gas_factor, _, _, _, _ = update_honda_bosch_live_learning(
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      desired_accel=0.5,  # positive error vs actual_accel=-0.5
+      actual_accel=-0.5,
+      gas_pedal_force=0.0,  # blocks gas-side learning
+      wind_brake_mps2=0.0,  # neutralize wind so result is unambiguous
+      brake_pressed=False,
+      v_ego=10.0,
+      accel_max=2.0,
+    )
+
+    assert gas_factor == pytest.approx(1.0)
+
+  def test_safe_decode_factor_handles_nan_and_garbage(self):
+    assert _safe_decode_factor(None) == 1.0
+    assert _safe_decode_factor(float("nan")) == 1.0
+    assert _safe_decode_factor(b"") == 1.0
+    assert _safe_decode_factor(b"abc") == 1.0
+    assert _safe_decode_factor("not a number") == 1.0
+    assert _safe_decode_factor(1.4) == pytest.approx(1.4)
+    assert _safe_decode_factor(b"1.4") == pytest.approx(1.4)
+    assert _safe_decode_factor(None, default=0.5) == 0.5
 
   def test_official_modified_eps_firmwares_restored(self):
     assert b'39990-TVA,A150\x00\x00' in FW_VERSIONS[CAR.HONDA_ACCORD][(CarParams.Ecu.eps, 0x18DA30F1, None)]
