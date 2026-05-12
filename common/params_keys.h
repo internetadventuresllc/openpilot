@@ -317,6 +317,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"HigherBitrate", {PERSISTENT, BOOL, "0", "0", 2}},
     {"HolidayThemes", {PERSISTENT, BOOL, "1", "0", 0}},
     {"HondaEPSClampReleased", {PERSISTENT, BOOL, "0", "0", 0}},
+    {"HondaGasFactorParams", {PERSISTENT, FLOAT, "1.0", "1.0"}},
+    {"HondaWindFactorParams", {PERSISTENT, FLOAT, "1.0", "1.0"}},
     {"HumanAcceleration", {PERSISTENT, BOOL, "0", "0", 2}},
     {"CoastUpToLeads", {PERSISTENT, BOOL, "1", "1", 2}},
     {"HumanLaneChanges", {PERSISTENT, BOOL, "0", "0", 2}},

@@ -1,6 +1,7 @@
 import math
 import numpy as np
 
+from openpilot.common.params import Params
 from opendbc.can import CANPacker
 from opendbc.car import ACCELERATION_DUE_TO_GRAVITY, Bus, DT_CTRL, rate_limit, make_tester_present_msg, structs
 from opendbc.car.honda import hondacan
@@ -19,6 +20,25 @@ from opendbc.car.interfaces import CarControllerBase
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
+
+PARAM_SAVE_INTERVAL_FRAMES = 6000  # 60s @ 100Hz; coalesces in params async writer
+
+
+def _safe_decode_factor(raw, default: float = 1.0) -> float:
+  # Defense-in-depth: Params.get() for FLOAT keys normally returns float|None,
+  # but if a stale .so / version skew lets unparseable bytes through, isolate
+  # the conversion so it can't crash CarController construction. Also rejects
+  # NaN/Inf: float("1e500") in Py3 returns inf without raising; np.clip passes
+  # NaN through unchanged (documented numpy behavior).
+  if raw is None:
+    return default
+  try:
+    v = float(raw)
+  except (ValueError, TypeError):
+    return default
+  if math.isnan(v) or math.isinf(v):
+    return default
+  return v
 
 
 def get_civic_bosch_modified_torque_lpf_tau(torque_cmd: float, prev_torque_cmd: float, v_ego: float) -> float:
@@ -97,13 +117,26 @@ def update_honda_bosch_live_learning(
   gas_factor: float,
   wind_factor: float,
   wind_factor_before_brake: float,
+  gas_factor_before_gasmax: float,
+  wind_factor_before_gasmax: float,
   desired_accel: float,
   actual_accel: float,
   gas_pedal_force: float,
   wind_brake_mps2: float,
   brake_pressed: bool,
   v_ego: float,
-) -> tuple[float, float, float]:
+  accel_max: float,
+) -> tuple[float, float, float, float, float]:
+  # NaN guard: numpy's np.clip passes NaN through unchanged. If any input is
+  # NaN (upstream model glitch, sensor dropout, divide-by-zero), the factor
+  # would collapse to NaN and propagate permanently within the drive — and
+  # the next np.interp would return a lookup endpoint instead of the
+  # intended value. Skip the update tick when any input is non-finite.
+  if not (math.isfinite(desired_accel) and math.isfinite(actual_accel)
+          and math.isfinite(gas_pedal_force) and math.isfinite(wind_brake_mps2)
+          and math.isfinite(v_ego)):
+    return gas_factor, wind_factor, wind_factor_before_brake, gas_factor_before_gasmax, wind_factor_before_gasmax
+
   accel_error = desired_accel - actual_accel
 
   if accel_error != 0.0 and gas_pedal_force > 0.0:
@@ -121,7 +154,14 @@ def update_honda_bosch_live_learning(
   else:
     wind_factor_before_brake = wind_factor
 
-  return gas_factor, wind_factor, wind_factor_before_brake
+  if gas_pedal_force >= accel_max:
+    gas_factor = min(gas_factor, gas_factor_before_gasmax)
+    wind_factor = min(wind_factor, wind_factor_before_gasmax)
+  else:
+    gas_factor_before_gasmax = gas_factor
+    wind_factor_before_gasmax = wind_factor
+
+  return gas_factor, wind_factor, wind_factor_before_brake, gas_factor_before_gasmax, wind_factor_before_gasmax
 
 
 def compute_gb_honda_bosch(accel, speed):
@@ -225,10 +265,35 @@ class CarController(CarControllerBase):
     self.prev_torque_cmd = 0.0
     self.steering_pressed_filter_s = 0.0
     self.steering_pressed_robust_prev = False
-    self.bosch_gas_factor = 1.0
-    self.bosch_wind_factor = 1.0
-    self.bosch_wind_factor_before_brake = 0.0
+    self._params = Params()
+    # common/params.py wraps super().get() with `except UnknownKeyName: return
+    # default` (lines 9-21), so a stale daemon that doesn't know the new keys
+    # returns None here without raising. No try/except needed at this layer.
+    raw_gas = self._params.get("HondaGasFactorParams")
+    raw_wind = self._params.get("HondaWindFactorParams")
+    self.bosch_gas_factor = float(np.clip(_safe_decode_factor(raw_gas), 0.1, 3.0))
+    self.bosch_wind_factor = float(np.clip(_safe_decode_factor(raw_wind), 0.1, 3.0))
+    self.bosch_wind_factor_before_brake = self.bosch_wind_factor
+    self.bosch_gas_factor_before_gasmax = self.bosch_gas_factor
+    self.bosch_wind_factor_before_gasmax = self.bosch_wind_factor
     self.pitch = 0.0
+
+    # Pond two-gate probe: the C++ params daemon's `put_nonblocking` path is
+    # NOT wrapped by common/params.py — it calls check_key() synchronously
+    # and raises UnknownKeyName if the daemon's compiled binary doesn't know
+    # the key. A 60s-cadence write on a dormant binary would crash the
+    # carcontroller mid-drive. Detect by attempting one write at init and
+    # gating runtime writes on the result. The probe write is benign (same
+    # value the daemon would return for an unset FLOAT key).
+    self._persistence_active = False
+    try:
+      self._params.put_nonblocking("HondaGasFactorParams", str(self.bosch_gas_factor))
+      self._params.put_nonblocking("HondaWindFactorParams", str(self.bosch_wind_factor))
+      self._persistence_active = True
+    except Exception:
+      # Daemon doesn't recognize the new keys (Pond two-gate: binaries pre-
+      # rebuild). Persistence stays dormant until next on-device rebuild.
+      pass
 
   def _modified_civic_standard_active(self) -> bool:
     return self.CP.carFingerprint == CAR.HONDA_CIVIC_BOSCH and bool(self.CP.flags & HondaFlags.EPS_MODIFIED)
@@ -269,6 +334,11 @@ class CarController(CarControllerBase):
           self.torque_lpf = 0.0
           self.prev_torque_cmd = 0.0
           torque_cmd = 0.0
+          # latActive stays True in this branch, so hondacan.create_steering_control
+          # still sends apply_torque on the wire. Without this reset, the rate-limiter
+          # below decays from a stale self.last_torque (up to ±0.03/cycle) and leaks
+          # residual EPS torque to the driver during override. Closes deferred QA HIGH.
+          self.last_torque = 0.0
         else:
           tau = get_civic_bosch_modified_torque_lpf_tau(torque_cmd, self.prev_torque_cmd, CS.out.vEgo)
           alpha = DT_CTRL / (tau + DT_CTRL)
@@ -280,6 +350,13 @@ class CarController(CarControllerBase):
         self.prev_torque_cmd = 0.0
         self.steering_pressed_filter_s = 0.0
         self.steering_pressed_robust_prev = False
+        # Mirror the filtered_steering_pressed reset: even though hondacan.py:119
+        # zeros STEER_TORQUE on the wire when lkas_active=False, the rate-limiter
+        # below still consumes self.last_torque as its baseline on the NEXT
+        # re-engage tick. Without this reset, re-engage from a held-curve state
+        # (last_torque=0.65) would clamp the first new torque_cmd to within
+        # ±0.03 of 0.65 — a noticeable lateral jolt the driver didn't ask for.
+        self.last_torque = 0.0
 
     # *** rate limit steer ***
     limited_torque = rate_limit(torque_cmd, self.last_torque, -self.params.STEER_DELTA_DOWN * DT_CTRL, self.params.STEER_DELTA_UP * DT_CTRL)
@@ -351,16 +428,25 @@ class CarController(CarControllerBase):
             wind_brake_mps2 = get_honda_bosch_wind_brake_mps2(CS.out.vEgo)
             if (actuators.longControlState == LongCtrlState.pid) and (not CS.out.gasPressed):
               gas_pedal_force += wind_brake_mps2 * self.bosch_wind_factor + hill_brake
-              self.bosch_gas_factor, self.bosch_wind_factor, self.bosch_wind_factor_before_brake = update_honda_bosch_live_learning(
+              (
                 self.bosch_gas_factor,
                 self.bosch_wind_factor,
                 self.bosch_wind_factor_before_brake,
+                self.bosch_gas_factor_before_gasmax,
+                self.bosch_wind_factor_before_gasmax,
+              ) = update_honda_bosch_live_learning(
+                self.bosch_gas_factor,
+                self.bosch_wind_factor,
+                self.bosch_wind_factor_before_brake,
+                self.bosch_gas_factor_before_gasmax,
+                self.bosch_wind_factor_before_gasmax,
                 self.accel,
                 CS.out.aEgo,
                 gas_pedal_force,
                 wind_brake_mps2,
                 bool(CS.out.brakePressed),
                 CS.out.vEgo,
+                self.params.BOSCH_ACCEL_MAX,
               )
             else:
               gas_pedal_force += wind_brake_mps2 + hill_brake
@@ -419,6 +505,19 @@ class CarController(CarControllerBase):
     new_actuators.brake = self.brake
     new_actuators.torque = self.last_torque
     new_actuators.torqueOutputCan = apply_torque
+
+    if (self._persistence_active and CC.enabled
+        and self.frame % PARAM_SAVE_INTERVAL_FRAMES == 0
+        and 0.1 < self.bosch_gas_factor < 3.0
+        and 0.1 < self.bosch_wind_factor < 3.0):
+      # Persistence gates (all required):
+      #   _persistence_active — daemon recognizes the keys (probed at init)
+      #   CC.enabled          — only persist values learned while OP was engaged
+      #   sanity band         — refuse to freeze clamp-pinned (0.1 or 3.0)
+      #                         values to disk; pinning is the README's
+      #                         "review trigger," not a steady-state to lock in
+      self._params.put_nonblocking("HondaGasFactorParams", str(self.bosch_gas_factor))
+      self._params.put_nonblocking("HondaWindFactorParams", str(self.bosch_wind_factor))
 
     self.frame += 1
     return new_actuators, can_sends
