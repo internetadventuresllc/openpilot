@@ -26,6 +26,10 @@ fi
 
 export STAGING_ROOT="/data/safe_staging"
 
+# Redirect uv cache to /data to avoid filling 517MB root partition during forced rebuilds.
+mkdir -p /data/uv-cache
+export UV_CACHE_DIR=/data/uv-cache
+
 # StarPilot variables (only available after StarPilot is installed to /data/openpilot)
 if [ -x /data/openpilot/starpilot/system/environment_variables ]; then
   eval "$(/data/openpilot/starpilot/system/environment_variables)"
