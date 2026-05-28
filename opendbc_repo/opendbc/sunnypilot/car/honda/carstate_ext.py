@@ -8,9 +8,11 @@ from enum import StrEnum
 
 from opendbc.car import Bus, structs
 from opendbc.can.parser import CANParser
-from opendbc.car.honda.values import (HONDA_BOSCH, HONDA_BOSCH_RADARLESS, HONDA_BOSCH_CANFD)
+from opendbc.car.honda.values import (CAR, HONDA_BOSCH, HONDA_BOSCH_RADARLESS, HONDA_BOSCH_CANFD)
 from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
 from opendbc.car.common.conversions import Conversions as CV
+
+DriveMode = structs.CarStateSP.DriveMode
 
 
 class CarStateExt:
@@ -39,3 +41,7 @@ class CarStateExt:
       # Same threshold as panda, equivalent to 1e-5 with previous DBC scaling
       gas = (cp.vl["GAS_SENSOR"]["INTERCEPTOR_GAS"] + cp.vl["GAS_SENSOR"]["INTERCEPTOR_GAS2"]) // 2
       ret.gasPressed = gas > 492
+
+    if self.CP.carFingerprint == CAR.HONDA_CIVIC_BOSCH:
+      # 2020 Civic: no Sport dial — ECON button only. ECON_STATUS (0x221) on Bus.pt (bus 1).
+      ret_sp.driveMode = DriveMode.eco if cp.vl["ECON_STATUS"]["ECON_ON"] else DriveMode.normal

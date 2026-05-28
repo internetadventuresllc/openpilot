@@ -3,6 +3,7 @@ import math
 import numpy as np
 
 import cereal.messaging as messaging
+from cereal import custom, log
 from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
 from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
@@ -136,9 +137,16 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     if force_slow_decel:
       v_cruise = 0.0
 
-    self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
+    # ECON override (HONDA_CIVIC_BOSCH): while the dash ECON button is lit, the car reports
+    # driveMode == eco; force the gentle "econ" longitudinal personality. When ECON is off,
+    # fall back to the manually-selected personality. Override-while-lit, reversible.
+    personality = sm['selfdriveState'].personality
+    if sm['carStateSP'].driveMode == custom.CarStateSP.DriveMode.eco:
+      personality = log.LongitudinalPersonality.econ
+
+    self.mpc.set_weights(prev_accel_constraint, personality=personality)
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
-    self.mpc.update(v_cruise, sm['modelV2'], sm['radarState'], personality=sm['selfdriveState'].personality)
+    self.mpc.update(v_cruise, sm['modelV2'], sm['radarState'], personality=personality)
 
     self.v_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.v_solution)
     self.a_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.a_solution)
