@@ -98,7 +98,7 @@ class CarInterface(CarInterfaceBase):
     ret.lateralTuning.pid.kf = 0.00006  # conservative feed-forward
     ret.steerActuatorDelay = 0.1
 
-    ret.stoppingDecelRate = 0.3  # smooth out harsh braking before standstill
+    ret.stoppingDecelRate = 0.5  # 2026-05-26 long tune: faster final stop ramp (was 0.3)
     if candidate in HONDA_BOSCH:
       ret.longitudinalActuatorDelay = 0.5 # s
       # longitudinal gas-only tuning for Bosch hondas is in carcontroller
@@ -127,7 +127,7 @@ class CarInterface(CarInterfaceBase):
       ret.lateralParams.torqueBP, ret.lateralParams.torqueV = [[0, 4096], [0, 4096]]
       ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.8], [0.24]]
       if candidate == CAR.HONDA_CIVIC_BOSCH:
-        CarControllerParams.BOSCH_GAS_LOOKUP_V = [0, 750]
+        CarControllerParams.BOSCH_GAS_LOOKUP_V = [0, 1100]  # 2026-05-26 long tune: raise gas ceiling for quicker green-light starts
 
     elif candidate == CAR.HONDA_CIVIC_2022:
       ret.lateralParams.torqueBP, ret.lateralParams.torqueV = [[0, 5120], [0, 5120]]  # TODO: determine if there is a dead zone at the top end
