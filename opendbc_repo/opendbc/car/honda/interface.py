@@ -365,8 +365,10 @@ class CarInterface(CarInterfaceBase):
         stock_cp.steerAtStandstill = True
         stock_cp.minEnableSpeed = -1.0
         stock_cp.minSteerSpeed = -1.0
-        stock_cp.lateralTuning.pid.kpBP, stock_cp.lateralTuning.pid.kpV = [[0, 10, 35], [0.012, 0.06, 0.12]]
-        stock_cp.lateralTuning.pid.kiBP, stock_cp.lateralTuning.pid.kiV = [[0, 10, 35], [0.004, 0.02, 0.04]]
+        # 2026-05-28: halve kp+ki to compensate the shll2 x2 EPS firmware (over-steer/oscillation fix).
+        # kf left unchanged (open-loop FF, outside the feedback loop). kp/ki now match the Clarity tune.
+        stock_cp.lateralTuning.pid.kpBP, stock_cp.lateralTuning.pid.kpV = [[0, 10, 35], [0.006, 0.03, 0.06]]
+        stock_cp.lateralTuning.pid.kiBP, stock_cp.lateralTuning.pid.kiV = [[0, 10, 35], [0.002, 0.01, 0.02]]
         stock_cp.lateralTuning.pid.kf = 0.000024
 
     elif candidate == CAR.HONDA_CLARITY:
