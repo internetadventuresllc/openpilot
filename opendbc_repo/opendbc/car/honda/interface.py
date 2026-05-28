@@ -127,7 +127,7 @@ class CarInterface(CarInterfaceBase):
       ret.lateralParams.torqueBP, ret.lateralParams.torqueV = [[0, 4096], [0, 4096]]
       ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.8], [0.24]]
       if candidate == CAR.HONDA_CIVIC_BOSCH:
-        CarControllerParams.BOSCH_GAS_LOOKUP_V = [0, 1100]  # 2026-05-26 long tune: raise gas ceiling for quicker green-light starts
+        CarControllerParams.BOSCH_GAS_LOOKUP_V = [0, 750]  # 2026-05-28 v2: reverted 1100->750 — stop-sign launch over-delivery (aEgo 2.19 > cmd 1.70); see SAFETY_stopsign_reaccel.md
 
     elif candidate == CAR.HONDA_CIVIC_2022:
       ret.lateralParams.torqueBP, ret.lateralParams.torqueV = [[0, 5120], [0, 5120]]  # TODO: determine if there is a dead zone at the top end
@@ -365,11 +365,12 @@ class CarInterface(CarInterfaceBase):
         stock_cp.steerAtStandstill = True
         stock_cp.minEnableSpeed = -1.0
         stock_cp.minSteerSpeed = -1.0
-        # 2026-05-28: halve kp+ki to compensate the shll2 x2 EPS firmware (over-steer/oscillation fix).
-        # kf left unchanged (open-loop FF, outside the feedback loop). kp/ki now match the Clarity tune.
-        stock_cp.lateralTuning.pid.kpBP, stock_cp.lateralTuning.pid.kpV = [[0, 10, 35], [0.006, 0.03, 0.06]]
+        # 2026-05-28 v2: lat-B halving over-corrected into lag / slow wind-unwind (50-60% undershoot,
+        # 0% saturation, output<0.2 for 82% of engaged time). Restore ~1.5x kp (still ~25% under stock =
+        # the over-steer point) + small kf bump for wind authority. ki unchanged. Watch overshoot fraction.
+        stock_cp.lateralTuning.pid.kpBP, stock_cp.lateralTuning.pid.kpV = [[0, 10, 35], [0.010, 0.045, 0.075]]
         stock_cp.lateralTuning.pid.kiBP, stock_cp.lateralTuning.pid.kiV = [[0, 10, 35], [0.002, 0.01, 0.02]]
-        stock_cp.lateralTuning.pid.kf = 0.000024
+        stock_cp.lateralTuning.pid.kf = 0.000032
 
     elif candidate == CAR.HONDA_CLARITY:
       stock_cp.lateralParams.torqueBP, stock_cp.lateralParams.torqueV = [[0, 1663], [0, 1663]]
