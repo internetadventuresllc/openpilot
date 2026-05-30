@@ -368,9 +368,13 @@ class CarInterface(CarInterfaceBase):
         # 2026-05-28 v2: lat-B halving over-corrected into lag / slow wind-unwind (50-60% undershoot,
         # 0% saturation, output<0.2 for 82% of engaged time). Restore ~1.5x kp (still ~25% under stock =
         # the over-steer point) + small kf bump for wind authority. ki unchanged. Watch overshoot fraction.
+        # 2026-05-29 v3: 05-29 drive showed marginal high-speed (>15 m/s) over-rotation, feedforward-dominated
+        # (f-share 0.52-0.62). Offline closed-loop sim (road_2026_05_29/_latsim.py, validated r=0.93 vs logged):
+        # kf trim attacks it at the source (-11.5%) with negligible low/mid lag collateral (integrator re-winds);
+        # a derivative/kd term is null here (event is a standing offset, wheel-rate ~0). kp/ki unchanged.
         stock_cp.lateralTuning.pid.kpBP, stock_cp.lateralTuning.pid.kpV = [[0, 10, 35], [0.010, 0.045, 0.075]]
         stock_cp.lateralTuning.pid.kiBP, stock_cp.lateralTuning.pid.kiV = [[0, 10, 35], [0.002, 0.01, 0.02]]
-        stock_cp.lateralTuning.pid.kf = 0.000032
+        stock_cp.lateralTuning.pid.kf = 0.000030
 
     elif candidate == CAR.HONDA_CLARITY:
       stock_cp.lateralParams.torqueBP, stock_cp.lateralParams.torqueV = [[0, 1663], [0, 1663]]
