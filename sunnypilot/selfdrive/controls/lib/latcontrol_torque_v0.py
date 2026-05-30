@@ -87,7 +87,7 @@ class LatControlTorque(LatControl):
     )
 
   def update(self, active, CS, VM, params, steer_limited_by_safety, desired_curvature,
-             calibrated_pose, curvature_limited, lat_delay=None):
+             calibrated_pose, curvature_limited, lat_delay=None, drive_mode=None):
     # Allow extension override of torque params.
     if self.extension.update_override_torque_params(self.torque_params):
       self.update_limits()

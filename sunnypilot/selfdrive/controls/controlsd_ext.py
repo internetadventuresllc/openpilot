@@ -31,7 +31,10 @@ class ControlsExt(ModelStateBase):
     self.CP_SP = messaging.log_from_bytes(params.get("CarParamsSP", block=True), custom.CarParamsSP)
     cloudlog.info("controlsd_ext got CarParamsSP")
 
-    self.sm_services_ext = ['radarState', 'selfdriveStateSP']
+    # 'carStateSP' added for the ab-econ-kf test branch: controlsd needs driveMode (the decoded
+    # ECON button state, published only on carStateSP) to drive the lateral kf A/B test in
+    # LatControlPID. Harmless to subscribe on other branches/cars.
+    self.sm_services_ext = ['radarState', 'selfdriveStateSP', 'carStateSP']
     self.pm_services_ext = ['carControlSP']
 
   def initialize_lateral_control(self, lac, CI, dt):

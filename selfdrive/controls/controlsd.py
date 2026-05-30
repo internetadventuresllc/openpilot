@@ -143,9 +143,15 @@ class Controls(ControlsExt):
     lat_delay = self.sm["liveDelay"].lateralDelay + LAT_SMOOTH_SECONDS
 
     actuators.curvature = self.desired_curvature
+    # ab-econ-kf test branch: hand the decoded ECON button state (carStateSP.driveMode) to the
+    # lateral controller so LatControlPID can map ECON lit/off -> lateral kf. driveMode lives only
+    # on carStateSP (not plain carState). Before carStateSP's first receipt the SubMaster returns a
+    # zeroed message (driveMode == unknown), which the kf logic safely treats as "not eco" -> LOW.
+    drive_mode = self.sm['carStateSP'].driveMode
     steer, steeringAngleDeg, lac_log = self.LaC.update(CC.latActive, CS, self.VM, lp,
                                                        self.steer_limited_by_safety, self.desired_curvature,
-                                                       self.calibrated_pose, curvature_limited, lat_delay)
+                                                       self.calibrated_pose, curvature_limited, lat_delay,
+                                                       drive_mode=drive_mode)
     actuators.torque = float(steer)
     actuators.steeringAngleDeg = float(steeringAngleDeg)
     # Ensure no NaNs/Infs

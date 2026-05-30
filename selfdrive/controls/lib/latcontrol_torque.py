@@ -182,7 +182,7 @@ class LatControlTorque(LatControl):
       return self._check_saturation(saturated, CS, steer_limited_by_safety)
 
   def update(self, active, CS, VM, params, steer_limited_by_safety, desired_curvature,
-             calibrated_pose, curvature_limited=False, lat_delay=None):
+             calibrated_pose, curvature_limited=False, lat_delay=None, drive_mode=None):
     self.update_live_tune()
 
     pid_log = log.ControlsState.LateralTorqueState.new_message()

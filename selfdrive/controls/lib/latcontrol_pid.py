@@ -1,7 +1,7 @@
 import math
 import numpy as np
 
-from cereal import log
+from cereal import custom, log
 from opendbc.car.honda.values import CAR
 from opendbc.car.honda.carcontroller import get_eps_modified_steering_pressed
 from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
@@ -11,6 +11,30 @@ from openpilot.selfdrive.controls.lib.latcontrol import LatControl
 
 
 CENTER_TAPER_FADE_TAU = 0.25
+
+# ---------------------------------------------------------------------------
+# ab-econ-kf TEST BRANCH: live lateral-kf A/B via the dash ECON button.
+#
+# While the ECON button is lit (carStateSP.driveMode == eco) the lateral
+# feedforward kf targets ECON_KF_HIGH; when off, ECON_KF_LOW. The effective kf
+# (self.ff_factor) is RAMPED toward the target a bounded step per control tick
+# and HARD-CLAMPED to [ECON_KF_LOW, ECON_KF_HIGH] so a button toggle can never
+# cause an instantaneous feedforward jump or push kf outside the known-safe range.
+#
+# Recovering which kf was active per tick: the ECON button state (ECON_ON, msg
+# 0x221) is on the logged CAN bus; combined with this mapping it labels each tick.
+# Secondarily, pid_log.f (the realized feedforward) is logged and lets the
+# effective kf be back-solved.
+#
+# Touches ONLY kf. No steer_max / torque / rate-limit / steerActuatorDelay /
+# panda-safety / longitudinal change here. Remove this block + the ramp logic in
+# update() to revert to the static kf.
+ECON_KF_LOW = 2.4e-5    # ECON off
+ECON_KF_HIGH = 3.2e-5   # ECON lit
+# Full LOW<->HIGH transition spans (HIGH-LOW)=0.8e-5. At DT_CTRL=0.01s, a step of
+# 1.0e-7/tick => ~0.8s for a full sweep (inside the spec's 0.5-1.0s window).
+ECON_KF_RAMP_PER_TICK = 1.0e-7
+_DriveMode = custom.CarStateSP.DriveMode
 
 
 def _center_taper_high(car_fingerprint) -> float:
@@ -81,7 +105,9 @@ class LatControlPID(LatControl):
                              (CP.lateralTuning.pid.kiBP, CP.lateralTuning.pid.kiV),
                              pos_limit=self.steer_max, neg_limit=-self.steer_max)
 
-    self.ff_factor = CP.lateralTuning.pid.kf
+    # ab-econ-kf: start the effective kf clamped into the safe test band so the very first
+    # tick is already in-range, then ramp toward the ECON-selected target each tick in update().
+    self.ff_factor = min(max(CP.lateralTuning.pid.kf, ECON_KF_LOW), ECON_KF_HIGH)
     self.CI = CI
     self.get_steer_feedforward = CI.get_steer_feedforward_function()
 
@@ -95,7 +121,19 @@ class LatControlPID(LatControl):
     self.prev_angle_steers_des_no_offset = 0.0
 
   def update(self, active, CS, VM, params, steer_limited_by_safety, desired_curvature,
-             calibrated_pose, curvature_limited, lat_delay):
+             calibrated_pose, curvature_limited, lat_delay, drive_mode=None):
+    # ab-econ-kf: ramp the effective feedforward kf toward the ECON-selected target every tick.
+    # ECON lit (driveMode == eco) -> ECON_KF_HIGH; otherwise -> ECON_KF_LOW. Bounded step per tick
+    # gives a smooth ~0.8s transition; result is hard-clamped to [ECON_KF_LOW, ECON_KF_HIGH].
+    # Runs every tick (active or not) so the kf is always tracking; it only feeds ff when active.
+    target_kf = ECON_KF_HIGH if drive_mode == _DriveMode.eco else ECON_KF_LOW
+    if self.ff_factor < target_kf:
+      self.ff_factor = min(self.ff_factor + ECON_KF_RAMP_PER_TICK, target_kf)
+    elif self.ff_factor > target_kf:
+      self.ff_factor = max(self.ff_factor - ECON_KF_RAMP_PER_TICK, target_kf)
+    # Hard safety clamp (defense in depth; target/ramp already stay in band).
+    self.ff_factor = min(max(self.ff_factor, ECON_KF_LOW), ECON_KF_HIGH)
+
     pid_log = log.ControlsState.LateralPIDState.new_message()
     pid_log.steeringAngleDeg = float(CS.steeringAngleDeg)
     pid_log.steeringRateDeg = float(CS.steeringRateDeg)

@@ -15,7 +15,10 @@ class LatControl(ABC):
 
   @abstractmethod
   def update(self, active: bool, CS, VM, params, steer_limited_by_safety: bool, desired_curvature: float, calibrated_pose: Pose,
-             curvature_limited: bool, lat_delay: float):
+             curvature_limited: bool, lat_delay: float, drive_mode=None):
+    # drive_mode (optional): cereal carStateSP.driveMode (custom.CarStateSP.DriveMode). Only the
+    # ab-econ-kf test branch consumes it (LatControlPID, to map the ECON button -> lateral kf).
+    # Angle/torque controllers ignore it; default None keeps them and any caller unaffected.
     pass
 
   def reset(self):

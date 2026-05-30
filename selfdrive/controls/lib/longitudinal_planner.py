@@ -137,12 +137,17 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     if force_slow_decel:
       v_cruise = 0.0
 
-    # ECON override (HONDA_CIVIC_BOSCH): while the dash ECON button is lit, the car reports
-    # driveMode == eco; force the gentle "econ" longitudinal personality. When ECON is off,
-    # fall back to the manually-selected personality. Override-while-lit, reversible.
+    # ECON override (HONDA_CIVIC_BOSCH): normally, while the dash ECON button is lit the car
+    # reports driveMode == eco and we force the gentle "econ" longitudinal personality.
+    #
+    # DECOUPLED ON ab-econ-kf TEST BRANCH: during the lateral kf A/B test the ECON button is
+    # repurposed to drive ONLY the lateral feedforward kf (see latcontrol_pid.py). To keep that
+    # experiment clean, the longitudinal econ-personality coupling is disabled here so a button
+    # toggle does NOT also change longitudinal behavior. The manually-selected personality is
+    # used as-is. Restore the block below to re-couple after the test.
     personality = sm['selfdriveState'].personality
-    if sm['carStateSP'].driveMode == custom.CarStateSP.DriveMode.eco:
-      personality = log.LongitudinalPersonality.econ
+    # if sm['carStateSP'].driveMode == custom.CarStateSP.DriveMode.eco:
+    #   personality = log.LongitudinalPersonality.econ
 
     self.mpc.set_weights(prev_accel_constraint, personality=personality)
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
