@@ -375,9 +375,12 @@ class CarInterface(CarInterfaceBase):
         # 2026-05-30 v4: one more conservative kf rung 3.0e-5 -> 2.8e-5. OPERATOR judgment, NOT a model pick —
         # the real-plant-grounded surrogate ABSTAINED (DROPPED: predicted gain ~1sigma, below its 2sigma floor;
         # over-rotation cost ~0 at v3 on the real plant). Inside the sane band (Aragon field-floor 2.4e-5). Re-drive to feel.
+        # 2026-05-30 A/B TEST -- branch ab-test-A: kf = 3.2e-5 (HIGH end). Pair = ab-test-B (kf 2.4e-5). ONE knob (kf)
+        # varied across the known-safe range; everything else fixed. Drive both back-to-back, same road/session, to
+        # un-bury the kf->over-rotation effect the observational data couldn't separate. NOT a daily tune.
         stock_cp.lateralTuning.pid.kpBP, stock_cp.lateralTuning.pid.kpV = [[0, 10, 35], [0.010, 0.045, 0.075]]
         stock_cp.lateralTuning.pid.kiBP, stock_cp.lateralTuning.pid.kiV = [[0, 10, 35], [0.002, 0.01, 0.02]]
-        stock_cp.lateralTuning.pid.kf = 0.000028
+        stock_cp.lateralTuning.pid.kf = 0.000032
 
     elif candidate == CAR.HONDA_CLARITY:
       stock_cp.lateralParams.torqueBP, stock_cp.lateralParams.torqueV = [[0, 1663], [0, 1663]]
