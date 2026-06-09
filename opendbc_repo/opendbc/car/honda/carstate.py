@@ -22,6 +22,14 @@ BUTTONS_DICT = {CruiseButtons.RES_ACCEL: ButtonType.accelCruise, CruiseButtons.D
                 CruiseButtons.MAIN: ButtonType.mainCruise, CruiseButtons.CANCEL: ButtonType.cancel}
 SETTINGS_BUTTONS_DICT = {CruiseSettings.DISTANCE: ButtonType.gapAdjustCruise, CruiseSettings.LKAS: ButtonType.lkas}
 
+# MAJOR #4 freshness gate for the relocated radar's 0x4F0 (ACC_CONTROL_RELOCATED). CANParser.vl retains
+# the LAST decoded value forever once a frame is seen, so a snapshot taken every frame would forward a
+# FROZEN phantom-brake ACCEL_COMMAND if 0x4F0 stops arriving. Mirror radar_interface's BOSCH_RADAR_STALE_S
+# (~0.15 s = ~3 missed 20 Hz frames): if the message's per-signal timestamp lags the parser's last-update
+# clock by more than this, treat it as stale and drop the snapshot (-> None) so the OP-2 override falls
+# back to plain OP-ACC instead of replaying a stale AEB. Compared via CANParser.ts_nanos (replay-safe).
+RADAR_RELOCATED_STALE_S = 0.15
+
 
 class CarState(CarStateBase, CarStateExt):
   def __init__(self, CP, CP_SP):
@@ -278,9 +286,20 @@ class CarState(CarStateBase, CarStateExt):
     # Flashed radar: read ACC_CONTROL_RELOCATED from the conditionally-added Bus.radar parser.
     # Guard for absence: parser is only in can_parsers when RADAR_FLASHED is set (get_can_parsers).
     # Factory AEB only stays live while OP is up (W1/W2 fail-safe acknowledged).
+    #
+    # MAJOR #4 freshness gate: CANParser.vl holds the LAST decoded value forever once a frame has been
+    # seen, so an unconditional snapshot would forward a FROZEN phantom-brake ACCEL_COMMAND after 0x4F0
+    # stops. Gate on the message's per-signal timestamp vs the parser's last-update clock (both replay-
+    # safe). If the 0x4F0 source has gone stale (> RADAR_RELOCATED_STALE_S), drop the snapshot to None so
+    # the OP-2 forward override falls back to plain OP-ACC instead of replaying a stale AEB event.
     cp_radar = can_parsers.get(Bus.radar)
     if cp_radar is not None:
-      self.radar_acc_relocated = dict(cp_radar.vl['ACC_CONTROL_RELOCATED'])
+      # ACCEL_COMMAND is decoded on every ACC_CONTROL_RELOCATED frame -> its ts_nanos tracks frame arrival.
+      msg_ts = cp_radar.ts_nanos['ACC_CONTROL_RELOCATED']['ACCEL_COMMAND']
+      # _last_update_nanos is the parser's current clock (same field radar_interface.py compares against
+      # for BOSCH_RADAR_STALE_S). msg_ts == 0 means 0x4F0 has not been seen yet -> stale.
+      fresh = msg_ts > 0 and (cp_radar._last_update_nanos - msg_ts) * 1e-9 <= RADAR_RELOCATED_STALE_S
+      self.radar_acc_relocated = dict(cp_radar.vl['ACC_CONTROL_RELOCATED']) if fresh else None
 
     return ret, ret_sp
 
@@ -297,7 +316,13 @@ class CarState(CarStateBase, CarStateExt):
     # (rlog src=2, confirmed; see radar_interface.py:119 and the DBC VERSION string).
     # ACC_CONTROL_RELOCATED is defined in OP-3; CANParser construction will fail at
     # startup if OP-3 is not merged before this atom is activated.
+    #
+    # MINOR (a): subscribe ACC_CONTROL_RELOCATED EXPLICITLY (not the lazy []), so the message registers
+    # at construction with a real frequency/timeout. This is what gives the MAJOR #4 freshness gate a
+    # populated ts_nanos entry and lets the parser's own bus_timeout machinery age the message; a lazy []
+    # parser would only learn the message on first arrival. The relocated radar emits 0x4F0 at ~17 Hz.
     if CP_SP.flags & HondaFlagsSP.RADAR_FLASHED:
-      parsers[Bus.radar] = CANParser(DBC[CP.carFingerprint][Bus.radar], [], CanBus(CP).camera)
+      parsers[Bus.radar] = CANParser(DBC[CP.carFingerprint][Bus.radar], [("ACC_CONTROL_RELOCATED", 17)],
+                                     CanBus(CP).camera)
 
     return parsers
