@@ -73,12 +73,16 @@ class CarInterface(CarInterfaceBase):
 
       # Flashed-radar gate: RADAR_FW_RELOCATED (b'36802-TBA,A160') means the 0x4F0-relocate stub is
       # running.  Unconditionally force op-long=True and pcmCruise=False regardless of alpha_long.
-      if candidate == CAR.HONDA_CIVIC_BOSCH and \
-         any(fw.ecu == structs.CarParams.Ecu.fwdRadar and RADAR_FW_RELOCATED in fw.fwVersion for fw in car_fw):
+      # radar_relocated is reused below to OR HondaSafetyFlags.BOSCH_RELOCATE into the Bosch-long
+      # safetyParam (so the panda admits forwarded full-authority AEB via the -1000 floor).
+      radar_relocated = candidate == CAR.HONDA_CIVIC_BOSCH and \
+         any(fw.ecu == structs.CarParams.Ecu.fwdRadar and RADAR_FW_RELOCATED in fw.fwVersion for fw in car_fw)
+      if radar_relocated:
         ret.openpilotLongitudinalControl = True
         ret.pcmCruise = False
         ret.radarUnavailable = False
     else:
+      radar_relocated = False  # non-Bosch: no relocate path
       ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.hondaNidec)]
       ret.openpilotLongitudinalControl = True
 
@@ -309,6 +313,12 @@ class CarInterface(CarInterfaceBase):
       ret.safetyConfigs[-1].safetyParam |= HondaSafetyFlags.NIDEC_ALT.value
     if ret.openpilotLongitudinalControl and candidate in HONDA_BOSCH:
       ret.safetyConfigs[-1].safetyParam |= HondaSafetyFlags.BOSCH_LONG.value
+      # Relocate-forward (BLOCKER #2): without BOSCH_RELOCATE the panda keeps the -350 floor and
+      # HARD-DROPS a forwarded full-authority AEB (~-8..-10 m/s2) to zero braking. OR it in ONLY for
+      # the relocated radar so the -1000 floor (honda_bosch_relocate_long = BOSCH_LONG && BOSCH_RELOCATE)
+      # admits the verbatim forward. Stock/0x280/radarless Bosch never set this -> keep the -350 floor.
+      if radar_relocated:
+        ret.safetyConfigs[-1].safetyParam |= HondaSafetyFlags.BOSCH_RELOCATE.value
     if candidate in HONDA_BOSCH_RADARLESS:
       ret.safetyConfigs[-1].safetyParam |= HondaSafetyFlags.RADARLESS.value
     if candidate in HONDA_BOSCH_CANFD:
@@ -448,7 +458,12 @@ class CarInterface(CarInterfaceBase):
 
   @staticmethod
   def init(CP, CP_SP, can_recv, can_send, communication_control=None):
-    if CP.carFingerprint in (HONDA_BOSCH - HONDA_BOSCH_RADARLESS) and CP.openpilotLongitudinalControl:
+    # MAJOR #3: on the flashed/relocated car op-long is FORCED True (see _get_params), which would make
+    # this disable_ecu MUTE the very radar whose relocated 0x4F0 the forward override reads. Skip the
+    # mute for the relocated/flashed radar so the radar keeps decisioning (incl. AEB) and broadcasting
+    # 0x4F0. CP_SP may be None (deinit re-enable path) -> treat as "not flashed" so re-enable still runs.
+    radar_flashed = CP_SP is not None and bool(CP_SP.flags & HondaFlagsSP.RADAR_FLASHED)
+    if CP.carFingerprint in (HONDA_BOSCH - HONDA_BOSCH_RADARLESS) and CP.openpilotLongitudinalControl and not radar_flashed:
       # 0x80 silences response
       if communication_control is None:
         communication_control = bytes([uds.SERVICE_TYPE.COMMUNICATION_CONTROL, 0x80 | uds.CONTROL_TYPE.DISABLE_RX_DISABLE_TX,
@@ -459,4 +474,6 @@ class CarInterface(CarInterfaceBase):
   def deinit(CP, can_recv, can_send):
     communication_control = bytes([uds.SERVICE_TYPE.COMMUNICATION_CONTROL, 0x80 | uds.CONTROL_TYPE.ENABLE_RX_ENABLE_TX,
                                    uds.MESSAGE_TYPE.NORMAL_AND_NETWORK_MANAGEMENT])
-    CarInterface.init(CP, can_recv, can_send, communication_control)
+    # CP_SP=None: re-enable must run regardless of the flashed-radar gate (the gate only suppresses the
+    # DISABLE in init(); a relocated car was never muted, so this ENABLE is a harmless no-op for it).
+    CarInterface.init(CP, None, can_recv, can_send, communication_control)
