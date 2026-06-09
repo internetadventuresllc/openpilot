@@ -346,6 +346,11 @@ class CarInterface(CarInterfaceBase):
       if fw.ecu == "eps" and b"," in fw.fwVersion:
         ret.flags |= HondaFlagsSP.EPS_MODIFIED.value
         stock_cp.dashcamOnly = False
+      # Flashed Bosch radar: fw string uses comma delimiter (e.g. b'36802-TBA,A160').
+      # Sets RADAR_FLASHED so carstate creates the Bus.radar parser and stashes
+      # radar_acc_relocated. Does NOT affect dashcamOnly (no fwdRadar+dashcamOnly coupling).
+      if fw.ecu == structs.CarParams.Ecu.fwdRadar and b"," in fw.fwVersion:
+        ret.flags |= HondaFlagsSP.RADAR_FLASHED.value
 
     if bool(stock_cp.flags & HondaFlags.NIDEC) and bool(stock_cp.flags & HondaFlags.HYBRID):
       ret.flags |= HondaFlagsSP.NIDEC_HYBRID.value

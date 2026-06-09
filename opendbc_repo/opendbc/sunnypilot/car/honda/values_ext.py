@@ -13,6 +13,7 @@ class HondaFlagsSP(IntFlag):
   EPS_MODIFIED = 2
   HYBRID_ALT_BRAKEHOLD = 4
   HAS_CAMERA_MESSAGES = 8
+  RADAR_FLASHED = 16
 
 
 class HondaSafetyFlagsSP:

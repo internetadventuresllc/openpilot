@@ -13,6 +13,7 @@ from opendbc.car.honda.values import CAR, DBC, STEER_THRESHOLD, HONDA_BOSCH, HON
 from opendbc.car.interfaces import CarStateBase
 
 from opendbc.sunnypilot.car.honda.carstate_ext import CarStateExt
+from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
 
 TransmissionType = structs.CarParams.TransmissionType
 ButtonType = structs.CarState.ButtonEvent.Type
@@ -61,6 +62,11 @@ class CarState(CarStateBase, CarStateExt):
 
     self.initial_accFault_cleared = False
     self.initial_accFault_cleared_timer = int(10 / DT_CTRL) # 10 seconds after startup for initial faults to clear
+
+    # Populated each frame when RADAR_FLASHED is set and Bus.radar parser is present.
+    # dict snapshot of ACC_CONTROL_RELOCATED from the flashed radar DBC (OP-3).
+    # None when RADAR_FLASHED is unset or the parser is absent.
+    self.radar_acc_relocated: dict | None = None
 
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
     cp = can_parsers[Bus.pt]
@@ -269,6 +275,13 @@ class CarState(CarStateBase, CarStateExt):
 
     CarStateExt.update(self, ret, ret_sp, can_parsers)
 
+    # Flashed radar: read ACC_CONTROL_RELOCATED from the conditionally-added Bus.radar parser.
+    # Guard for absence: parser is only in can_parsers when RADAR_FLASHED is set (get_can_parsers).
+    # Factory AEB only stays live while OP is up (W1/W2 fail-safe acknowledged).
+    cp_radar = can_parsers.get(Bus.radar)
+    if cp_radar is not None:
+      self.radar_acc_relocated = dict(cp_radar.vl['ACC_CONTROL_RELOCATED'])
+
     return ret, ret_sp
 
   def get_can_parsers(self, CP, CP_SP):
@@ -278,5 +291,13 @@ class CarState(CarStateBase, CarStateExt):
     }
     if CP.enableBsm:
       parsers[Bus.body] = CANParser(DBC[CP.carFingerprint][Bus.body], [], CanBus(CP).radar)
+
+    # Flashed radar gate: add the Bus.radar parser only when the SP flag is set.
+    # Bus arg is CanBus(CP).camera — radar frames are physically on the camera bus
+    # (rlog src=2, confirmed; see radar_interface.py:119 and the DBC VERSION string).
+    # ACC_CONTROL_RELOCATED is defined in OP-3; CANParser construction will fail at
+    # startup if OP-3 is not merged before this atom is activated.
+    if CP_SP.flags & HondaFlagsSP.RADAR_FLASHED:
+      parsers[Bus.radar] = CANParser(DBC[CP.carFingerprint][Bus.radar], [], CanBus(CP).camera)
 
     return parsers

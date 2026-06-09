@@ -26,6 +26,12 @@ FW_VERSIONS_EXT = {
       b'39990-TGG,A020\x00\x00',
       b'39990-TGG,A120\x00\x00',
     ],
+    # Flashed Bosch radar: comma-delimited variant of 36802-TBA-A160.
+    # fwdRadar is ESSENTIAL + FUZZY_EXCLUDE — without this entry the exact-match
+    # candidate is silently dropped and the car fails to fingerprint as HONDA_CIVIC_BOSCH.
+    (Ecu.fwdRadar, 0x18dab0f1, None): [
+      b'36802-TBA,A160\x00\x00',
+    ],
   },
   CAR.HONDA_CRV_5G: {
     (Ecu.eps, 0x18da30f1, None): [
