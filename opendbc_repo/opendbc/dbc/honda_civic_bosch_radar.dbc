@@ -100,6 +100,17 @@ BO_ 713 RADAR_SELECTED_1: 8 RADAR
  SG_ CNTR : 63|4@0+ (1,0) [0|15] "" XXX
  SG_ CHKSUM : 59|4@0+ (1,0) [0|15] "" XXX
 
+BO_ 1264 ACC_CONTROL_RELOCATED: 8 RADAR
+ SG_ GAS_COMMAND : 7|16@0- (1,0) [0|0] "" XXX
+ SG_ CONTROL_ON : 23|3@0+ (1,0) [0|5] "" XXX
+ SG_ ACCEL_COMMAND : 31|11@0- (0.01,0) [0|0] "m/s2" XXX
+ SG_ AEB_STATUS : 33|1@0+ (1,0) [0|1] "" XXX
+ SG_ BRAKE_REQUEST : 34|1@0+ (1,0) [0|1] "" XXX
+ SG_ STANDSTILL : 35|1@0+ (1,0) [0|1] "" XXX
+ SG_ AEB_PREPARE : 43|1@0+ (1,0) [0|1] "" XXX
+ SG_ AEB_BRAKING : 47|1@0+ (1,0) [0|1] "" XXX
+ SG_ CNTR : 61|2@0+ (1,0) [0|3] "" XXX
+
 
 CM_ "Stock 36802-TBA Bosch radar FINE per-track object table. Big-endian (Motorola), all frames DLC8. The radar broadcasts 6 track records, each a 4-frame burst on consecutive IDs; only the HEADER ID of each record (0x280/0x284/0x2D0/0x2D4/0x2D8/0x2DC) carries RANGE, and only on the sub-frame where B1==0x74 (the range-carrier header tag). The other 3 sub-frames of each record (0x281-0x283, 0x285-0x287, 0x2D1-0x2D3, ...) carry lateral/velocity/status and would decode to spurious sub-zero range -- they are deliberately NOT declared, so the parser never reads them as range. The parser GATES on TRACK_TAG(B1)==0x74. Sentinels (any one -> not an active track): STRENGTH(B0)==0xFE (idle), RANGE_RAW(B2:B3)==0x8000 (~114m unset), RANGE_RAW>=0xFF80 (~230m saturation rail). RANGE and RANGE_RAW intentionally overlap B2:B3 (scaled meters vs raw int for the sentinel test) -- opendbc decodes overlapping signals independently, exactly like the coarse LONG_DIST/LONG_DIST_HI overlap. RANGE scale/offset (0.00357, -3.0) is cross-car-validated; the offset -3.0 is tape-anchored. LAT_RAW is offset-binary (raw 0x8000 = center, declared with offset -32768); its physical m/LSB is NOT pinned, so the parser applies a clearly-placeholdered LAT_SCALE and yRel magnitude is DO_NOT_TRUST until a controlled lateral cal. vRel is NOT published by the radar on these frames; the parser derives it as d(dRel)/dt per track. 0x2C8/0x2C9 remain declared as a dormant coarse reference and are NOT read by the fine parser.";
 CM_ BO_ 640 "Track slot 0 header (record 0x280-0x283). Range carrier when TRACK_TAG(B1)==0x74. Head of the 6-slot sweep burst.";
