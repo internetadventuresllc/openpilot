@@ -545,7 +545,8 @@ class TestHondaBoschLongSafety(HondaButtonEnableBase, TestHondaBoschSafetyBase):
   STEER_BUS = 1
   TX_MSGS = [[0xE4, 1], [0x1DF, 1], [0x1EF, 1], [0x1FA, 1], [0x30C, 1], [0x33D, 1], [0x33DA, 1], [0x33DB, 1], [0x39F, 1], [0x18DAB0F1, 1]]
   FWD_BLACKLISTED_ADDRS = {}
-  # 0x1DF is to test that radar is disabled
+  # 0x1DF is the ACC_CONTROL longitudinal command (bosch-long path); on the relocate-forward
+  # branch this message is sourced from the forwarded 0x4F0 radar output rather than the OEM radar
   RELAY_MALFUNCTION_ADDRS = {1: (0xE4, 0x1DF, 0x33D, 0x33DA, 0x33DB)}  # STEERING_CONTROL, ACC_CONTROL
 
   def setUp(self):
@@ -587,6 +588,42 @@ class TestHondaBoschLongSafety(HondaButtonEnableBase, TestHondaBoschSafetyBase):
         self.safety.set_controls_allowed(controls_allowed)
         send = self.MIN_ACCEL <= accel <= self.MAX_ACCEL if controls_allowed else accel == 0
         self.assertEqual(send, self._tx(self._send_gas_brake_msg(self.NO_GAS, accel)), (controls_allowed, accel))
+
+
+class TestHondaBoschRelocateLongSafety(TestHondaBoschLongSafety):
+  """
+  Covers the 0x4F0 relocate-and-forward path: BOSCH_LONG | BOSCH_RELOCATE.
+
+  The 0x1DF accel check uses HONDA_BOSCH_RELOCATE_LONG_LIMITS (min_accel=-1000 centiunits,
+  -10.0 m/s2) so that a verbatim forward of full-authority factory AEB decel is admitted
+  rather than dropped (R1: drop == zero braking at the emergency moment).
+
+  The 0x1C8 radarless path is on the original HONDA_BOSCH_LONG_LIMITS (-350 / -3.5 m/s2)
+  and is exercised by TestHondaBoschRadarlessLongSafety, which is unaffected.
+
+  W1/W2 note: panda gates forwarded AEB via controls_allowed; factory AEB has no
+  panda-blessed wire path when OP is disengaged/down.
+  """
+  MIN_ACCEL = -10.0
+
+  def setUp(self):
+    # Call grandparent setUp to avoid double-init from TestHondaBoschLongSafety.setUp
+    TestHondaBoschSafetyBase.setUp(self)
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hondaBosch,
+                                  HondaSafetyFlags.BOSCH_LONG | HondaSafetyFlags.BOSCH_RELOCATE)
+    self.safety.init_tests()
+
+  def test_brake_safety_check(self):
+    """Verify 0x1DF admits down to MIN_ACCEL=-10.0 and rejects below it."""
+    for controls_allowed in [True, False]:
+      for accel in np.arange(self.MIN_ACCEL - 1, self.MAX_ACCEL + 1, 0.01):
+        accel = round(accel, 2)
+        self.safety.set_controls_allowed(controls_allowed)
+        send = self.MIN_ACCEL <= accel <= self.MAX_ACCEL if controls_allowed else accel == 0
+        self.assertEqual(send, self._tx(self._send_gas_brake_msg(self.NO_GAS, accel)),
+                         (controls_allowed, accel))
+
+  # gas check inherited from TestHondaBoschLongSafety is correct (MAX_GAS/NO_GAS unchanged)
 
 
 class TestHondaBoschRadarlessSafetyBase(TestHondaBoschSafetyBase):

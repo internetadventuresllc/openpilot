@@ -43,6 +43,7 @@ static bool honda_fwd_brake = false;
 static bool honda_bosch_long = false;
 static bool honda_bosch_radarless = false;
 static bool honda_bosch_canfd = false;
+static bool honda_bosch_relocate_long = false;
 static bool honda_nidec_hybrid = false;
 typedef enum {HONDA_NIDEC, HONDA_BOSCH} HondaHw;
 static HondaHw honda_hw = HONDA_NIDEC;
@@ -226,6 +227,18 @@ static bool honda_tx_hook(const CANPacket_t *msg) {
     .inactive_gas = -30000,
   };
 
+  // Separate limits for the 0x4F0 relocate-and-forward path: must admit full-authority
+  // factory AEB decel (~-8..-10 m/s2 = -800..-1000 in centiunits). A separate struct
+  // is mandatory — sharing HONDA_BOSCH_LONG_LIMITS would loosen the 0x1C8 radarless
+  // path (R4/stumble#5). Selected only when honda_bosch_relocate_long is set.
+  const LongitudinalLimits HONDA_BOSCH_RELOCATE_LONG_LIMITS = {
+    .max_accel = 200,
+    .min_accel = -1000,
+
+    .max_gas = 2200,
+    .inactive_gas = -30000,
+  };
+
   const LongitudinalLimits HONDA_NIDEC_LONG_LIMITS = {
     .max_gas = 198,  // 0xc6
     .max_brake = 255,
@@ -276,8 +289,12 @@ static bool honda_tx_hook(const CANPacket_t *msg) {
     gas = to_signed(gas, 16);
 
     bool violation = false;
-    violation |= longitudinal_accel_checks(accel, HONDA_BOSCH_LONG_LIMITS);
-    violation |= longitudinal_gas_checks(gas, HONDA_BOSCH_LONG_LIMITS);
+    // Use the relaxed relocate limits only when the relocate-forward path is active;
+    // all other bosch-long configurations (including CANFD) keep the -350 floor.
+    const LongitudinalLimits *bosch_long_limits = honda_bosch_relocate_long
+      ? &HONDA_BOSCH_RELOCATE_LONG_LIMITS : &HONDA_BOSCH_LONG_LIMITS;
+    violation |= longitudinal_accel_checks(accel, *bosch_long_limits);
+    violation |= longitudinal_gas_checks(gas, *bosch_long_limits);
     if (violation) {
       tx = false;
     }
@@ -466,11 +483,23 @@ static safety_config honda_bosch_init(uint16_t param) {
   // Checking for alternate brake override from safety parameter
   honda_alt_brake_msg = GET_FLAG(param, HONDA_PARAM_ALT_BRAKE);
 
-  // radar disabled so allow gas/brakes
-#ifdef ALLOW_DEBUG
+  // Allow OP longitudinal control (gas/brakes) on Bosch hardware.
+  // Hoisted out of ALLOW_DEBUG so honda_bosch_long is settable on release builds;
+  // without this hoist, 0x1DF is never whitelisted in TX msgs and all OP TX is dropped.
   const uint16_t HONDA_PARAM_BOSCH_LONG = 2;
   honda_bosch_long = GET_FLAG(param, HONDA_PARAM_BOSCH_LONG);
-#endif
+
+  // Relocate-and-forward path: 0x1DF accel check uses HONDA_BOSCH_RELOCATE_LONG_LIMITS
+  // (min_accel=-1000) to admit full-authority factory AEB decel forwarded from 0x4F0.
+  // Only active when this flag is set; 0x1C8 (radarless) is unaffected.
+  // NOTE (W1/W2): panda only gates forwarded AEB while controls_allowed=true (OP up).
+  // Factory AEB has no panda-blessed wire path when OP is disengaged/down.
+  //
+  // NOTE (0x4F0 rx): rx frames are unrestricted in the panda safety model — safety_rx_hook
+  // never blocks inbound frames to OP, and honda_bosch_hooks has no .fwd hook, so 0x4F0
+  // passes through by default. No code change is needed for 0x4F0 rx allowance.
+  const uint16_t HONDA_PARAM_BOSCH_RELOCATE = 32;
+  honda_bosch_relocate_long = honda_bosch_long && GET_FLAG(param, HONDA_PARAM_BOSCH_RELOCATE);
 
   safety_config ret;
   if (honda_bosch_radarless || honda_bosch_canfd) {

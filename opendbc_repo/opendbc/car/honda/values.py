@@ -56,6 +56,7 @@ class HondaSafetyFlags(IntFlag):
   NIDEC_ALT = 4
   RADARLESS = 8
   BOSCH_CANFD = 16
+  BOSCH_RELOCATE = 32  # 0x4F0 relocate-and-forward path; relaxes 0x1DF min_accel to -1000 centiunits (-10 m/s2)
 
 
 class HondaFlags(IntFlag):
