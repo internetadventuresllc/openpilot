@@ -498,6 +498,16 @@ static safety_config honda_bosch_init(uint16_t param) {
   // NOTE (0x4F0 rx): rx frames are unrestricted in the panda safety model — safety_rx_hook
   // never blocks inbound frames to OP, and honda_bosch_hooks has no .fwd hook, so 0x4F0
   // passes through by default. No code change is needed for 0x4F0 rx allowance.
+  //
+  // MAJOR #5 reconciliation: the BOSCH_LONG hoist above DOES widen release exposure (any Bosch car
+  // that sets BOSCH_LONG can now whitelist 0x1DF on a non-debug build — this is the pre-existing
+  // op-long enablement mechanism, unchanged in kind). The RELOCATE-specific behavior — the relaxed
+  // -1000 accel floor on 0x1DF — is INDEPENDENTLY gated: honda_bosch_relocate_long requires BOTH
+  // honda_bosch_long AND BOSCH_RELOCATE, and it is the SOLE selector of HONDA_BOSCH_RELOCATE_LONG_LIMITS
+  // (see the 0x1DF check). So even if BOSCH_LONG is reachable on a release panda for some other Bosch
+  // car, that car still gets the stock -350 floor; only a car that ALSO sets BOSCH_RELOCATE (the
+  // production interface.py sets it solely for the RADAR_FW_RELOCATED radar) sees -1000. The radarless
+  // 0x1C8 path always uses HONDA_BOSCH_LONG_LIMITS (-350), independent of either flag.
   const uint16_t HONDA_PARAM_BOSCH_RELOCATE = 32;
   honda_bosch_relocate_long = honda_bosch_long && GET_FLAG(param, HONDA_PARAM_BOSCH_RELOCATE);
 
