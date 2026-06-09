@@ -17,6 +17,7 @@ from opendbc.car.common.pid import PIDController
 from opendbc.sunnypilot.car.honda.mads import MadsCarController
 from opendbc.sunnypilot.car.honda.gas_interceptor import GasInterceptorCarController
 from opendbc.sunnypilot.car.honda.icbm import IntelligentCruiseButtonManagementInterface
+from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -232,6 +233,7 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     self.params = CarControllerParams(CP)
     self.CAN = hondacan.CanBus(CP)
     self.tja_control = CP.carFingerprint in HONDA_BOSCH_TJA_CONTROL
+    self.radar_flashed = bool(CP_SP.flags & HondaFlagsSP.RADAR_FLASHED)
     self.param_reader = Params()
     self.param_writer = HondaParamWriter()
 
@@ -539,7 +541,8 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
           stopping = actuators.longControlState == LongCtrlState.stopping
           self.stopping_counter = self.stopping_counter + 1 if stopping else 0
           can_sends.extend(hondacan.create_acc_commands(self.packer, self.CAN, CC.enabled, CC.longActive, self.accel, self.gas,
-                                                        self.stopping_counter, self.CP.carFingerprint, gas_pedal_force))
+                                                        self.stopping_counter, self.CP.carFingerprint, gas_pedal_force,
+                                                        radar_aeb=(CS.radar_acc_relocated if self.radar_flashed else None)))
         else:
           apply_brake = np.clip(self.brake_last - wind_brake, 0.0, 1.0)
           apply_brake = int(np.clip(apply_brake * self.params.NIDEC_BRAKE_MAX, 0, self.params.NIDEC_BRAKE_MAX - 1))

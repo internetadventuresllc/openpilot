@@ -77,7 +77,7 @@ def create_brake_command(packer, CAN, apply_brake, pump_on, pcm_override, pcm_ca
   return packer.make_can_msg("BRAKE_COMMAND", CAN.pt, values)
 
 
-def create_acc_commands(packer, CAN, enabled, active, accel, gas, stopping_counter, car_fingerprint, gas_force):
+def create_acc_commands(packer, CAN, enabled, active, accel, gas, stopping_counter, car_fingerprint, gas_force, radar_aeb=None):
 
   commands = []
   min_gas_accel = CarControllerParams.BOSCH_GAS_LOOKUP_BP[0]
@@ -116,6 +116,21 @@ def create_acc_commands(packer, CAN, enabled, active, accel, gas, stopping_count
       "SET_TO_30": 0x30,
     }
     commands.append(packer.make_can_msg("ACC_CONTROL_ON", CAN.pt, acc_control_on_values))
+
+  # Radar-AEB forward override (OP-2): when the flashed radar's 0x4F0 slot carries an active
+  # AEB event, clobber OP-ACC with the radar's decel command and set all AEB bits so the
+  # Honda powertrain sees a properly-formed AEB request.  Override runs last so it always wins
+  # same-cycle vs OP-generated accel (correct safety polarity; F2/F3).
+  # Guard: skip on HONDA_BOSCH_RADARLESS (different frame semantics, no radar path) and when
+  # radar_aeb is None (unflashed car, or stale 0x4F0 cleared upstream by the OP-4 parser).
+  if (radar_aeb is not None
+      and car_fingerprint not in HONDA_BOSCH_RADARLESS
+      and any(radar_aeb.get(bit, 0) for bit in ('AEB_STATUS', 'AEB_PREPARE', 'AEB_BRAKING', 'BRAKE_REQUEST'))):
+    acc_control_values['ACCEL_COMMAND'] = radar_aeb['ACCEL_COMMAND']
+    acc_control_values['BRAKE_REQUEST'] = 1
+    acc_control_values['AEB_STATUS'] = radar_aeb.get('AEB_STATUS', 0)
+    acc_control_values['AEB_PREPARE'] = radar_aeb.get('AEB_PREPARE', 0)
+    acc_control_values['AEB_BRAKING'] = radar_aeb.get('AEB_BRAKING', 0)
 
   commands.append(packer.make_can_msg("ACC_CONTROL", CAN.pt, acc_control_values))
   return commands
