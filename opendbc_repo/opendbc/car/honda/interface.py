@@ -6,7 +6,7 @@ from opendbc.car.disable_ecu import disable_ecu
 from opendbc.car.honda.hondacan import CanBus
 from opendbc.car.honda.values import CarControllerParams, HondaFlags, CAR, HONDA_BOSCH, HONDA_BOSCH_CANFD, \
                                                  HONDA_NIDEC_ALT_SCM_MESSAGES, HONDA_BOSCH_RADARLESS, HondaSafetyFlags, \
-                                                 RADAR_FW_0X280_INGEST
+                                                 RADAR_FW_0X280_INGEST, RADAR_FW_RELOCATED
 from opendbc.car.honda.carcontroller import CarController
 from opendbc.car.honda.carstate import CarState
 from opendbc.car.honda.radar_interface import RadarInterface
@@ -61,10 +61,22 @@ class CarInterface(CarInterfaceBase):
       # values.py). Only that radar keeps streaming 0x280 objects under op-long, so only it is kept
       # radar-live (radarUnavailable=False); any other Civic Bosch radar fw keeps the standard HONDA_BOSCH
       # path above (radarUnavailable=True) as the safe default. alpha-long/op-long are standard for all
-      # Bosch (set above). Factory AEB does NOT stay live under op-long (accepted). Fail-safe: if car_fw
-      # is empty/unknown the radar stays off.
+      # Bosch (set above). Fail-safe: if car_fw is empty/unknown the radar stays off.
+      #
+      # For the flashed/relocated radar (RADAR_FW_RELOCATED, comma discriminator): op-long is FORCED True
+      # (un-pinned from alpha_long) and radarUnavailable stays False.  The radar forwards AEB via OP's
+      # 0x1DF ONLY WHILE OP IS UP — factory AEB is NOT active when OP is dark (W1/W2 regression, accepted
+      # by operator).
       if candidate == CAR.HONDA_CIVIC_BOSCH and \
          any(fw.ecu == structs.CarParams.Ecu.fwdRadar and RADAR_FW_0X280_INGEST in fw.fwVersion for fw in car_fw):
+        ret.radarUnavailable = False
+
+      # Flashed-radar gate: RADAR_FW_RELOCATED (b'36802-TBA,A160') means the 0x4F0-relocate stub is
+      # running.  Unconditionally force op-long=True and pcmCruise=False regardless of alpha_long.
+      if candidate == CAR.HONDA_CIVIC_BOSCH and \
+         any(fw.ecu == structs.CarParams.Ecu.fwdRadar and RADAR_FW_RELOCATED in fw.fwVersion for fw in car_fw):
+        ret.openpilotLongitudinalControl = True
+        ret.pcmCruise = False
         ret.radarUnavailable = False
     else:
       ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.hondaNidec)]

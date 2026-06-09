@@ -482,6 +482,12 @@ HONDA_BOSCH_ALT_RADAR = CAR.with_flags(HondaFlags.BOSCH_ALT_RADAR)
 # kept radar-live for the 0x280 ingest; any other radar fw falls back to the stock path (radar off) for
 # safety. Substring match so fwVersion padding/null bytes don't matter.
 RADAR_FW_0X280_INGEST = b"36802-TBA-A160"
+
+# Radar fw string reported after the 0x4F0 relocate-and-forward flash. The comma (vs. hyphen) is the
+# sole discriminator between flashed and stock. Presence of this string: forces op-long=True (un-pins
+# from alpha_long) and keeps radarUnavailable=False. W1/W2 regression: factory AEB forwarded via OP's
+# 0x1DF ONLY WHILE OP IS UP — fails dark if OP exits.
+RADAR_FW_RELOCATED = b"36802-TBA,A160"
 HONDA_BOSCH_TJA_CONTROL = CAR.with_flags(HondaFlags.BOSCH_TJA_CONTROL)
 HONDA_LKAS_MINSPEED_CUTOFF = CAR.with_flags(HondaFlags.LKAS_MINSPEED_CUTOFF)
 
