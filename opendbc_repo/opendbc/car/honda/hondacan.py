@@ -4,6 +4,13 @@ from opendbc.car.honda.values import (CAR, HondaFlags, HONDA_BOSCH, HONDA_BOSCH_
                                       HONDA_BOSCH_CANFD, CarControllerParams)
 from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
 
+# OP-side clamp floor for a FORWARDED radar-AEB decel on the relocate path. Mirrors the panda's
+# HONDA_BOSCH_RELOCATE_LONG_LIMITS.min_accel = -1000 centiunits (honda.h). ACCEL_COMMAND is m/s2
+# (DBC scale 0.01), so -1000 centiunits == -10.0 m/s2. The panda is the authoritative backstop;
+# this OP-side clamp keeps the forwarded value within what the panda would admit (defense in depth)
+# so a malformed/over-range radar decel can't even reach the wire below the panda floor.
+HONDA_BOSCH_RELOCATE_ACCEL_MIN = -10.0  # m/s2
+
 # CAN bus layout with relay
 # 0 = ACC-CAN - radar side
 # 1 = F-CAN B - powertrain
@@ -118,15 +125,26 @@ def create_acc_commands(packer, CAN, enabled, active, accel, gas, stopping_count
     commands.append(packer.make_can_msg("ACC_CONTROL_ON", CAN.pt, acc_control_on_values))
 
   # Radar-AEB forward override (OP-2): when the flashed radar's 0x4F0 slot carries an active
-  # AEB event, clobber OP-ACC with the radar's decel command and set all AEB bits so the
+  # AEB BRAKING event, clobber OP-ACC with the radar's decel command and set the AEB bits so the
   # Honda powertrain sees a properly-formed AEB request.  Override runs last so it always wins
   # same-cycle vs OP-generated accel (correct safety polarity; F2/F3).
   # Guard: skip on HONDA_BOSCH_RADARLESS (different frame semantics, no radar path) and when
-  # radar_aeb is None (unflashed car, or stale 0x4F0 cleared upstream by the OP-4 parser).
+  # radar_aeb is None (unflashed car, or stale 0x4F0 cleared upstream by the OP-4 freshness gate).
+  #
+  # lens1 fix: the prior union (AEB_STATUS|AEB_PREPARE|AEB_BRAKING|BRAKE_REQUEST, no sign check) would
+  # force BRAKE_REQUEST=1 on a PREPARE-only pre-charge (radar arming brakes, NOT yet decelerating) and
+  # would copy a non-negative ACCEL_COMMAND verbatim. Require an ACTUAL commanded decel before treating
+  # this as a brake event: a real AEB_BRAKING/BRAKE_REQUEST assertion AND ACCEL_COMMAND < 0. A PREPARE-only
+  # frame, or any frame with a non-negative accel, is NOT forwarded as braking. The forwarded accel is then
+  # clamped to the panda relocate floor (-10.0 m/s2 == the -1000 centiunit HONDA_BOSCH_RELOCATE_LONG_LIMITS)
+  # so a malformed/over-range radar decel can never exceed what the panda safety model would admit.
+  radar_braking = bool(radar_aeb.get('AEB_BRAKING', 0) or radar_aeb.get('BRAKE_REQUEST', 0)) if radar_aeb is not None else False
+  radar_decel = radar_aeb.get('ACCEL_COMMAND', 0.0) if radar_aeb is not None else 0.0
   if (radar_aeb is not None
       and car_fingerprint not in HONDA_BOSCH_RADARLESS
-      and any(radar_aeb.get(bit, 0) for bit in ('AEB_STATUS', 'AEB_PREPARE', 'AEB_BRAKING', 'BRAKE_REQUEST'))):
-    acc_control_values['ACCEL_COMMAND'] = radar_aeb['ACCEL_COMMAND']
+      and radar_braking
+      and radar_decel < 0.0):
+    acc_control_values['ACCEL_COMMAND'] = max(radar_decel, HONDA_BOSCH_RELOCATE_ACCEL_MIN)
     acc_control_values['BRAKE_REQUEST'] = 1
     acc_control_values['AEB_STATUS'] = radar_aeb.get('AEB_STATUS', 0)
     acc_control_values['AEB_PREPARE'] = radar_aeb.get('AEB_PREPARE', 0)
