@@ -75,6 +75,13 @@ class CarInterface(CarInterfaceBase):
       # running.  Unconditionally force op-long=True and pcmCruise=False regardless of alpha_long.
       # radar_relocated is reused below to OR HondaSafetyFlags.BOSCH_RELOCATE into the Bosch-long
       # safetyParam (so the panda admits forwarded full-authority AEB via the -1000 floor).
+      #
+      # MINOR (b): the comma fw (RADAR_FW_RELOCATED) INTENTIONALLY subsumes the 0x280-ingest radar-live
+      # assertion above. The relocate flash is the 0x280-ingest radar PLUS the 0x1DF->0x4F0 retarget +
+      # comma marker, so its fw (comma) no longer substring-matches RADAR_FW_0X280_INGEST (hyphen) and
+      # the 0x280 block above does NOT fire for it. radarUnavailable=False is re-asserted here so the
+      # relocated car stays radar-live for the 0x280 fine-range objects too -- the comma path is a
+      # superset of the hyphen path, not a separate radar.
       radar_relocated = candidate == CAR.HONDA_CIVIC_BOSCH and \
          any(fw.ecu == structs.CarParams.Ecu.fwdRadar and RADAR_FW_RELOCATED in fw.fwVersion for fw in car_fw)
       if radar_relocated:
