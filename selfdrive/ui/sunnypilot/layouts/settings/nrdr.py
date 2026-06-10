@@ -4,7 +4,7 @@ nrdr experimental settings panel.
 from enum import IntEnum
 
 from openpilot.system.ui.lib.multilang import tr
-from openpilot.system.ui.sunnypilot.widgets.list_view import simple_button_item_sp, LineSeparatorSP
+from openpilot.system.ui.sunnypilot.widgets.list_view import simple_button_item_sp, toggle_item_sp, LineSeparatorSP
 from openpilot.system.ui.widgets.scroller_tici import Scroller
 from openpilot.system.ui.widgets import Widget
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.nrdr_sub_layouts.learned_parameters import LearnedParametersLayout
@@ -64,6 +64,13 @@ class NrdrLayout(Widget):
       callback=lambda: self._set_current_panel(PanelType.PARTY_TRICKS),
     )
 
+    self._radar_tryout = toggle_item_sp(
+      param="HondaCivicRadarTryout",
+      title=lambda: tr("Try Honda Bosch Radar (experimental)"),
+      description=lambda: tr("EXPERIMENTAL — Honda Bosch radar. When ON, openpilot reads the factory Bosch radar's fine-range objects (0x280) and treats this car like a fingerprint-matched radar car (radarUnavailable=False + the custom honda_civic_bosch_radar DBC). If you ALSO enable openpilot experimental/alpha longitudinal, this radar WILL feed openpilot's lead tracking and command braking/acceleration — exactly like a matched car. With openpilot longitudinal OFF (stock ACC) it is perception only. The 0x280 decode is reverse-engineered and cross-car validated (~0.99) but NOT verified on your specific car: before enabling openpilot longitudinal, VALIDATE that lead distance and closing-rate match reality. Honda Civic Bosch only. Leave OFF if unsure."),
+      initial_state=False,
+    )
+
     return [
       self._learned_button,
       LineSeparatorSP(40),
@@ -74,6 +81,8 @@ class NrdrLayout(Widget):
       self._longitudinal_button,
       LineSeparatorSP(40),
       self._party_tricks_button,
+      LineSeparatorSP(40),
+      self._radar_tryout,
     ]
 
   def _set_current_panel(self, panel: PanelType):
