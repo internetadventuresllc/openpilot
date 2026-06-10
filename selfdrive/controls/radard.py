@@ -26,6 +26,10 @@ SPEED, ACCEL = 0, 1     # Kalman filter states enum
 # stationary qualification parameters
 V_EGO_STATIONARY = 4.   # no stationary object flag below this speed
 
+# K1 (nrdrbranchdebug-86t.3): max consecutive unmeasured (placeholder-vRel) cycles the lead KF
+# is allowed to coast (predict-only) before publishing falls back to raw ingestion values
+UNMEASURED_COAST_CYCLES = 5
+
 RADAR_TO_CENTER = 2.7   # (deprecated) RADAR is ~ 2.7m ahead from center of car
 RADAR_TO_CAMERA = 1.52  # RADAR is ~ 1.5m ahead from center of mesh frame
 
@@ -56,41 +60,77 @@ class Track:
   def __init__(self, identifier: int, v_lead: float, kalman_params: KalmanParams):
     self.identifier = identifier
     self.cnt = 0
+    self.unmeasured_cnt = 0
+    self.v_ego = 0.0
     self.aLeadTau = FirstOrderFilter(_LEAD_ACCEL_TAU, 0.45, DT_MDL)
     self.K_A = kalman_params.A
     self.K_C = kalman_params.C
     self.K_K = kalman_params.K
+    # K1: never seed the KF with NaN (Bosch fine ingest publishes vRel=NaN on placeholder cycles;
+    # a NaN-seeded KF1D is poisoned for the track's whole life — the e72fa4e failure class)
+    if math.isnan(v_lead):
+      v_lead = 0.0
     self.kf = KF1D([[v_lead], [0.0]], self.K_A, self.K_C, self.K_K)
 
-  def update(self, d_rel: float, y_rel: float, v_rel: float, v_lead: float, measured: float):
+  def update(self, d_rel: float, y_rel: float, v_rel: float, v_lead: float, measured: float, v_ego: float = 0.0):
+    # K1: placeholder cycles on the Bosch fine ingest carry vRel=NaN, measured=False. Sanitize so
+    # NaN can never reach the KF, the vision matcher, or the published radarState.
+    measured = bool(measured) and not math.isnan(v_rel)
+    if math.isnan(v_rel):
+      v_rel = 0.0
+      v_lead = v_ego
+
     # relative values, copy
     self.dRel = d_rel   # LONG_DIST
     self.yRel = y_rel   # -LAT_DIST
     self.vRel = v_rel   # REL_SPEED
     self.vLead = v_lead
     self.measured = measured   # measured or estimate
+    self.v_ego = v_ego
 
     # computed velocity and accelerations
+    # K1: only feed the KF real measurements; on placeholder cycles coast (predict-only) so a
+    # braking lead's estimate keeps evolving instead of being dragged toward relative-stationary
     if self.cnt > 0:
-      self.kf.update(self.vLead)
+      if measured:
+        self.kf.update(self.vLead)
+        self.unmeasured_cnt = 0
+      else:
+        self.unmeasured_cnt += 1
+        if self.unmeasured_cnt <= UNMEASURED_COAST_CYCLES:
+          v, a = float(self.kf.x[SPEED][0]), float(self.kf.x[ACCEL][0])
+          self.kf.set_x([[v + self.K_A[0][1] * a], [a]])
+    elif not measured:
+      self.unmeasured_cnt += 1
 
     self.vLeadK = float(self.kf.x[SPEED][0])
     self.aLeadK = float(self.kf.x[ACCEL][0])
 
-    # Learn if constant acceleration
-    if abs(self.aLeadK) < 0.5:
-      self.aLeadTau.x = _LEAD_ACCEL_TAU
-    else:
-      self.aLeadTau.update(0.0)
+    # Learn if constant acceleration (K1: only from measured cycles — placeholder vRel carries
+    # no acceleration information)
+    if measured:
+      if abs(self.aLeadK) < 0.5:
+        self.aLeadTau.x = _LEAD_ACCEL_TAU
+      else:
+        self.aLeadTau.update(0.0)
 
     self.cnt += 1
 
   def get_RadarState(self, model_prob: float = 0.0):
+    # K1: on unmeasured cycles publish the KF estimate instead of the fake relative-stationary
+    # sample (the MPC anchors on raw vLead in process_lead). After UNMEASURED_COAST_CYCLES
+    # consecutive placeholder cycles the coasted estimate is stale — fall back to ingestion.
+    if not self.measured and self.unmeasured_cnt <= UNMEASURED_COAST_CYCLES:
+      v_lead_pub = self.vLeadK
+      v_rel_pub = self.vLeadK - self.v_ego
+    else:
+      v_lead_pub = self.vLead
+      v_rel_pub = self.vRel
     return {
       "dRel": float(self.dRel),
       "yRel": float(self.yRel),
-      "vRel": float(self.vRel),
-      "vLead": float(self.vLead),
+      "vRel": float(v_rel_pub),
+      "vLead": float(v_lead_pub),
       "vLeadK": float(self.vLeadK),
       "aLeadK": float(self.aLeadK),
       "aLeadTau": float(self.aLeadTau.x),
@@ -231,6 +271,18 @@ class RadarD:
       if ids not in ar_pts:
         self.tracks.pop(ids, None)
 
+    if len(sm['modelV2'].velocity.x):
+      model_v_ego = sm['modelV2'].velocity.x[0]
+    else:
+      model_v_ego = self.v_ego
+    leads_v3 = sm['modelV2'].leadsV3
+
+    # K1: velocity seed for tracks born on an unmeasured (placeholder-vRel) cycle. Without this
+    # the KF seeds at v_ego (relative-stationary) and the seed bias survives the measured gate.
+    vision_seed = None
+    if self.ready and len(leads_v3) and leads_v3[0].prob > .5 and len(leads_v3[0].v):
+      vision_seed = (leads_v3[0].x[0] - RADAR_TO_CAMERA, self.v_ego + (leads_v3[0].v[0] - model_v_ego))
+
     # *** compute the tracks ***
     for ids in ar_pts:
       rpt = ar_pts[ids]
@@ -240,8 +292,14 @@ class RadarD:
 
       # create the track if it doesn't exist or it's a new track
       if ids not in self.tracks:
-        self.tracks[ids] = Track(ids, v_lead, self.kalman_params)
-      self.tracks[ids].update(rpt[0], rpt[1], rpt[2], v_lead, rpt[3])
+        v_seed = v_lead
+        unmeasured_birth = not bool(rpt[3]) or math.isnan(rpt[2])
+        if unmeasured_birth and vision_seed is not None and abs(rpt[0] - vision_seed[0]) < max(0.25 * vision_seed[0], 5.0):
+          v_seed = vision_seed[1]
+        elif unmeasured_birth:
+          v_seed = self.v_ego_hist[0]  # finite relative-stationary fallback (never NaN)
+        self.tracks[ids] = Track(ids, v_seed, self.kalman_params)
+      self.tracks[ids].update(rpt[0], rpt[1], rpt[2], v_lead, rpt[3], self.v_ego_hist[0])
 
     # *** publish radarState ***
     self.radar_state_valid = sm.all_checks()
@@ -250,11 +308,6 @@ class RadarD:
     self.radar_state.radarErrors = rr.errors
     self.radar_state.carStateMonoTime = sm.logMonoTime['carState']
 
-    if len(sm['modelV2'].velocity.x):
-      model_v_ego = sm['modelV2'].velocity.x[0]
-    else:
-      model_v_ego = self.v_ego
-    leads_v3 = sm['modelV2'].leadsV3
     if len(leads_v3) > 1:
       self.radar_state.leadOne = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego, self.CP, self.CP_SP, low_speed_override=True)
       self.radar_state.leadTwo = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego, self.CP, self.CP_SP, low_speed_override=False)
