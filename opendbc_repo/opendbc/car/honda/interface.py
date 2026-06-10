@@ -57,7 +57,7 @@ class CarInterface(CarInterfaceBase):
       ret.openpilotLongitudinalControl = alpha_long
       ret.pcmCruise = not ret.openpilotLongitudinalControl
 
-          # 0x280 fine-range radar ingest is GATED on the confirmed radar firmware (RADAR_FW_0X280_INGEST in
+      # 0x280 fine-range radar ingest is GATED on the confirmed radar firmware (RADAR_FW_0X280_INGEST in
       # values.py). Only that radar keeps streaming 0x280 objects under op-long, so only it is kept
       # radar-live (radarUnavailable=False); any other Civic Bosch radar fw keeps the standard HONDA_BOSCH
       # path above (radarUnavailable=True) as the safe default. alpha-long/op-long are standard for all
