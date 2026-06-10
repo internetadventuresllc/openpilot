@@ -370,6 +370,10 @@
     "title": "Has Accepted sunnypilot Terms",
     "description": ""
   },
+  "HondaCivicRadarTryout": {
+    "title": "Civic Radar Tryout (openpilot longitudinal via radar)",
+    "description": "Enables radar-fed openpilot longitudinal control on compatible Honda Civic models. When enabled, the onboard Bosch radar is used to drive op-long instead of camera-only ACC. This setting is read at car start -- toggling it on the dashboard configures the NEXT drive, not the current one."
+  },
   "HideVEgoUI": {
     "title": "[TIZI/TICI only] Speedometer: Hide from Onroad Screen",
     "description": "When enabled, the speedometer on the onroad screen is not displayed."

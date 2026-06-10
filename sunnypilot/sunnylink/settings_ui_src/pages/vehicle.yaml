@@ -6,6 +6,19 @@ icon: vehicle
 order: 99
 kind: vehicle
 sections:
+- id: honda
+  title: Honda / Acura Settings
+  description: ''
+  items:
+  - key: HondaCivicRadarTryout
+    widget: toggle
+    needs_onroad_cycle: true
+    title: Civic Radar Tryout (openpilot longitudinal via radar)
+    description: Enables radar-fed openpilot longitudinal control on compatible Honda Civic models. When
+      enabled, the onboard Bosch radar is used to drive op-long instead of camera-only ACC. This setting
+      is read at car start -- toggling it on the dashboard configures the NEXT drive, not the current one.
+    enablement:
+    - $ref: '#/macros/not_engaged'
 - id: hyundai
   title: Hyundai / Kia / Genesis Settings
   description: ''
