@@ -10,9 +10,10 @@ from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL, Priority, config_realtime_process
 from openpilot.common.swaglog import cloudlog
-from openpilot.common.simple_kalman import KF1D
+from openpilot.common.simple_kalman import KF1D, get_kalman_gain
 
 from opendbc.car import structs
+from opendbc.car.honda.values import CAR as HONDA_CAR
 from opendbc.car.hyundai.values import HyundaiFlags
 from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP
 
@@ -30,17 +31,35 @@ V_EGO_STATIONARY = 4.   # no stationary object flag below this speed
 # is allowed to coast (predict-only) before publishing falls back to raw ingestion values
 UNMEASURED_COAST_CYCLES = 5
 
+# K2 (nrdrbranchdebug-86t.5): one-smoother architecture for the Civic Bosch fine ingest. The R1
+# source KF already delivers a low-noise vRel posterior; the stock K0/K1 gain tables bake in a
+# generic R=1e3 and would silently re-create cascade smoothing on top of it (sim: 720 ms to see
+# 50% of a -3 m/s^2 lead decel in aLeadK). DARE-solved gains for the actual noise instead.
+# Sim receipts (2026-06-10, synthetic braking lead through R1 source KF -> this KF):
+#   stock gains: aLeadK noise 0.10, 50%-decel-lag 12 sweeps (720 ms)
+#   Q=[0,4.0] R=0.1: aLeadK noise 0.33, 50%-decel-lag 5 sweeps (300 ms)  <- shipped
+CIVIC_BOSCH_LEAD_KF_Q = [0.0, 4.0]   # [v, a] process noise; accel-driven model
+CIVIC_BOSCH_LEAD_KF_R = 0.1          # (m/s)^2; R1 posterior rate noise + v_ego noise
+CIVIC_BOSCH_LEAD_KF_DT = 0.06        # s; true radar sweep cadence (updates are freshness-gated)
+
 RADAR_TO_CENTER = 2.7   # (deprecated) RADAR is ~ 2.7m ahead from center of car
 RADAR_TO_CAMERA = 1.52  # RADAR is ~ 1.5m ahead from center of mesh frame
 
 
 class KalmanParams:
-  def __init__(self, dt: float):
+  def __init__(self, dt: float, civic_bosch_fine: bool = False):
     # Lead Kalman Filter params, calculating K from A, C, Q, R requires the control library.
     # hardcoding a lookup table to compute K for values of radar_ts between 0.01s and 0.2s
     assert dt > .01 and dt < .2, "Radar time step must be between .01s and 0.2s"
     self.A = [[1.0, dt], [0.0, 1.0]]
     self.C = [1.0, 0.0]
+    if civic_bosch_fine:
+      # K2: gains conditioned on the R1 source-KF posterior noise (see constants above); the
+      # stock tables below assume a raw, noisy measurement and would cascade-smooth.
+      K = get_kalman_gain(dt, np.array(self.A), np.array([self.C]),
+                          np.diag(CIVIC_BOSCH_LEAD_KF_Q), np.array([[CIVIC_BOSCH_LEAD_KF_R]]))
+      self.K = [[float(K[0, 0])], [float(K[1, 0])]]
+      return
     #Q = np.matrix([[10., 0.0], [0.0, 100.]])
     #R = 1e3
     #K = np.matrix([[ 0.05705578], [ 0.03073241]])
@@ -244,7 +263,15 @@ class RadarD:
     self.current_time = 0.0
 
     self.tracks: dict[int, Track] = {}
-    self.kalman_params = KalmanParams(DT_MDL)
+    # K2: Civic-Bosch-fine-conditioned gains + freshness gating; every other brand keeps the
+    # stock table gains and stock cadence behavior (their tuning assumes both).
+    self._civic_bosch_fine = (CP.brand == "honda" and not CP.radarUnavailable
+                              and CP.carFingerprint == HONDA_CAR.HONDA_CIVIC_BOSCH)
+    if self._civic_bosch_fine:
+      self.kalman_params = KalmanParams(CIVIC_BOSCH_LEAD_KF_DT, civic_bosch_fine=True)
+    else:
+      self.kalman_params = KalmanParams(DT_MDL)
+    self._last_tracks_frame = -1
 
     self.v_ego = 0.0
     self.v_ego_hist = deque([0.0], maxlen=int(round(delay / DT_MDL))+1)
@@ -264,7 +291,15 @@ class RadarD:
       self.v_ego_hist.append(self.v_ego)
       self.last_v_ego_frame = sm.recv_frame['carState']
 
-    ar_pts = {pt.trackId: [pt.dRel, pt.yRel, pt.vRel, pt.measured] for pt in rr.points}
+    # K2: freshness gate -- radard polls at 20 Hz (modelV2) but the radar sweeps at ~16.7 Hz, so the
+    # same liveTracks sample can be consumed twice, double-absorbing one measurement into the lead KF.
+    # Repeats are treated as unmeasured cycles (the K1 coast path). Civic-Bosch-fine only.
+    radar_fresh = True
+    if self._civic_bosch_fine:
+      radar_fresh = sm.recv_frame['liveTracks'] != self._last_tracks_frame
+      self._last_tracks_frame = sm.recv_frame['liveTracks']
+
+    ar_pts = {pt.trackId: [pt.dRel, pt.yRel, pt.vRel, pt.measured and radar_fresh] for pt in rr.points}
 
     # *** remove missing points from meta data ***
     for ids in list(self.tracks.keys()):
