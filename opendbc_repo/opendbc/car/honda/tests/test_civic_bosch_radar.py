@@ -348,8 +348,9 @@ class TestCivicBoschFineParser(unittest.TestCase):
     far_raw = int((110.0 + 3.0) / 0.00357)
     rr = self._emit(2 * dt_ns, [self._f(0x280, _hdr_frame(far_raw, cntr=0x12))], 0x12)
     p = rr.points[0]
-    self.assertTrue(math.isnan(p.vRel))               # phantom rejected -> NaN, not ~1900 m/s
-    self.assertFalse(p.measured)                       # S5: NaN vRel -> estimate, not a measurement
+    self.assertFalse(math.isnan(p.vRel))              # SAFETY: parser must never publish NaN vRel to radard
+    self.assertEqual(p.vRel, 0.0)                      # phantom rejected -> finite 0.0 placeholder, not ~1900 m/s
+    self.assertFalse(p.measured)                       # S5: re-seed estimate -> 0.0 placeholder, not a measurement
     self.assertAlmostEqual(p.dRel, 0.00357 * far_raw - 3.0, places=2)  # dRel still tracks the new object
     id_b = p.trackId                                   # object B's trackId (post-swap)
     # S1 core assertion: the swap produced a NEW trackId (no reuse). Both still decode to slot 0.
@@ -503,7 +504,7 @@ class TestCivicBoschFineSafeParity(unittest.TestCase):
     # Force a re-seed via a discontinuity -> vRel NaN this cycle -> measured False.
     far = int((120.0 + 3.0) / 0.00357)
     rr = self._emit(2, [self._f(0x280, _hdr_frame(far, cntr=0x12))], 0x12)
-    self.assertTrue(math.isnan(rr.points[0].vRel))
+    self.assertEqual(rr.points[0].vRel, 0.0)         # re-seed estimate -> finite 0.0 placeholder, never NaN
     self.assertFalse(rr.points[0].measured)
 
   # ---- S6 vRel derivation hardening -----------------------------------------------------------
@@ -515,7 +516,7 @@ class TestCivicBoschFineSafeParity(unittest.TestCase):
     # next sweep arrives after a > DT_MAX gap with a large dRel change
     gap_k = int((BOSCH_RADAR_VREL_DT_MAX_S + 0.2) / 0.05) + 1
     rr = self._emit(1 + gap_k, [self._f(0x280, _hdr_frame(2000, cntr=0x12))], 0x12)
-    self.assertTrue(math.isnan(rr.points[0].vRel))   # re-seeded, not a spike
+    self.assertEqual(rr.points[0].vRel, 0.0)         # re-seeded -> finite 0.0 placeholder, never NaN (not a spike)
     # the cycle AFTER re-seed derives a clean, in-bounds vRel from the new baseline
     rr = self._emit(2 + gap_k, [self._f(0x280, _hdr_frame(1990, cntr=0x13))], 0x13)
     self.assertFalse(math.isnan(rr.points[0].vRel))
@@ -548,6 +549,32 @@ class TestCivicBoschFineSafeParity(unittest.TestCase):
     self._emit(0, [self._f(0x280, _hdr_frame(rng, cntr=0x10))], 0x10)
     rr = self._emit(1, [self._f(0x280, _hdr_frame(rng - 50, cntr=0x11))], 0x11)
     self.assertTrue(all(math.isnan(p.aRel) for p in rr.points))  # aRel never fabricated (R2 deferred)
+
+  def test_no_nan_vrel_ever_published(self):
+    # SAFETY REGRESSION (blocker): radard ingests every point's vRel with NO NaN/measured guard and seeds/
+    # updates a per-track KF1D with it; a single NaN poisons vLeadK/aLeadK PERMANENTLY and propagates into
+    # the longitudinal MPC. So the parser must NEVER publish a NaN vRel on an emitted point. Drive all the
+    # estimate paths (born-from-prime, slot-reuse discontinuity break, long-gap re-seed) and assert every
+    # emitted point has a finite vRel; estimate cycles publish a finite 0.0 placeholder with measured=False.
+    far = int((110.0 + 3.0) / 0.00357)
+    gap_k = int((BOSCH_RADAR_VREL_DT_MAX_S + 0.2) / 0.05) + 3
+    emitted = [
+      self._emit(0, [self._f(0x280, _hdr_frame(3900, cntr=0x10))], 0x10),            # prime
+      self._emit(1, [self._f(0x280, _hdr_frame(3910, cntr=0x11))], 0x11),            # born (real derived vRel)
+      self._emit(2, [self._f(0x280, _hdr_frame(far, cntr=0x12))], 0x12),             # slot-reuse discontinuity
+      self._emit(2 + gap_k, [self._f(0x280, _hdr_frame(far - 200, cntr=0x13))], 0x13),  # long-gap re-seed
+    ]
+    saw_estimate = False
+    for rr in emitted:
+      if rr is None:
+        continue
+      for p in rr.points:
+        self.assertFalse(math.isnan(p.vRel), "parser published NaN vRel to radard")
+        self.assertFalse(math.isnan(p.dRel))
+        if not p.measured:
+          self.assertEqual(p.vRel, 0.0)  # estimate cycle -> finite 0.0 placeholder, never NaN
+          saw_estimate = True
+    self.assertTrue(saw_estimate)  # the discontinuity/re-seed estimate paths were actually exercised
 
 
 @unittest.skipUnless(os.path.exists(BFCAR_CSV), "radar-re bfcar capture not present")
@@ -590,7 +617,7 @@ class TestCivicBoschFineRealCapture(unittest.TestCase):
       rr = ri.update(_can(i * dt_ns, [(addr, data, bus) for addr, data in sweep]))
       if rr is not None and rr.points:
         ranges.append(rr.points[0].dRel)
-        if not math.isnan(rr.points[0].vRel):
+        if rr.points[0].measured:  # count only real derived vRels (estimate cycles publish a 0.0 placeholder)
           vrels.append(rr.points[0].vRel)
     self.assertGreater(len(ranges), 100)
     # Clean monotonic close 11.28 -> 1.52 m (CONFIRM-REPORT); allow a small margin. (S3 plausibility: every

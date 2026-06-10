@@ -10,6 +10,13 @@ from opendbc.car.honda.values import DBC, CAR
 
 
 def _create_nidec_can_parser(car_fingerprint):
+  # Defensive: a fingerprint whose DBC declares no Bus.radar (e.g. HONDA_CIVIC_BOSCH_DIESEL, and most
+  # HONDA_BOSCH) must degrade to no-radar rather than raise KeyError if it ever reaches this NIDEC
+  # fall-through with radarUnavailable=False (mirrors _create_bosch_can_parser's guard). update() already
+  # treats rcp=None as no-radar. Not reachable through current gating (radar-live keys strictly on
+  # CAR.HONDA_CIVIC_BOSCH); this is latent hardening against a future gating regression.
+  if Bus.radar not in DBC[car_fingerprint]:
+    return None
   radar_messages = [0x400] + list(range(0x430, 0x43A)) + list(range(0x440, 0x446))
   messages = [(m, 20) for m in radar_messages]
   return CANParser(DBC[car_fingerprint][Bus.radar], messages, 1)
@@ -229,7 +236,12 @@ class RadarInterface(RadarInterfaceBase):
 
   def _update_bosch(self, updated_messages):
     # FINE per-track object table (0x280 block). Fixed slot map (0x280->slot0 ... 0x2DC->slot5).
-    # RX-parse only; never takes 0x1DF / longitudinal authority, so factory AEB/CMBS stays fully live.
+    # RX-parse only; never takes 0x1DF / longitudinal authority. NOTE: "factory AEB/CMBS stays live" holds
+    # ONLY in the radar-only / stock-ACC (pcmCruise) configuration. Once alpha-long / op-long is enabled,
+    # CarInterface.init() performs the standard 0x18DAB0F1 radar-ECU knockout (disable_ecu) and factory AEB
+    # is DISABLED -- this is the accepted, intended Bosch-long behavior (see interface.py init() and its
+    # "Factory AEB does NOT stay live under op-long (accepted)" note). The RX-only parser does not by itself
+    # preserve AEB; it just never transmits.
     # Up to 6 RadarPoints are emitted; radard selects leadOne/leadTwo (we do NOT pre-select).
     #
     # trackId is slot*STRIDE + incarnation (S1, no-reuse). vRel is NOT published on these frames (rlog-
@@ -373,12 +385,22 @@ class RadarInterface(RadarInterfaceBase):
       # (0.0009-0.001 deg/LSB band; absolute boresight zero still unpinned) but field identity is HIGH.
       az_deg = cpt['LAT_RAW'] * BOSCH_RADAR_LAT_SCALE_DEG_PER_LSB
       self.pts[slot].yRel = -dRel * sin(az_deg * pi / 180.0)
-      self.pts[slot].vRel = vRel
+      # SAFETY: NEVER hand radard a NaN vRel. radard (selfdrive/controls/radard.py) ingests every point's
+      # vRel unconditionally (no NaN / measured guard), computes v_lead = vRel + v_ego, and seeds/updates a
+      # per-track KF1D with it. The KF's linear recurrence is poisoned PERMANENTLY by a single NaN -- vLeadK
+      # and aLeadK go NaN for the whole life of that track (later finite measurements never recover it) --
+      # and that NaN then propagates into the longitudinal MPC obstacle constraints. So on any cycle where
+      # vRel is not yet a valid derived value (first-sight, slot-reuse discontinuity break, long-gap
+      # re-seed, or a non-advancing clock) publish a FINITE 0.0 placeholder (relative-stationary: the safe
+      # neutral seed, identical to what a constant-distance lead yields) and flag the point as an estimate
+      # via measured=False below. dRel/yRel remain the real measurements.
+      vrel_valid = not math.isnan(vRel)
+      self.pts[slot].vRel = vRel if vrel_valid else 0.0
       # S5 honest measured flag: vRel is a DERIVED estimate, so flag the point as an estimate (measured=
-      # False) whenever vRel is not yet a valid derived value (first-sight/re-seed NaN). dRel/yRel are
-      # real measurements, but the capnp measured bit is about point-as-measurement-vs-estimate, and our
-      # headline kinematic (vRel) is derived -- True only once a stable derived vRel exists.
-      self.pts[slot].measured = not math.isnan(vRel)
+      # False) whenever vRel is not yet a valid derived value (first-sight/re-seed -> 0.0 placeholder above).
+      # dRel/yRel are real measurements, but the capnp measured bit is about point-as-measurement-vs-estimate,
+      # and our headline kinematic (vRel) is derived -- True only once a stable derived vRel exists.
+      self.pts[slot].measured = vrel_valid
 
     ret.points = list(self.pts.values())
     return ret

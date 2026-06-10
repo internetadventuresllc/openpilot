@@ -194,7 +194,9 @@ class CAR(Platforms):
     ],
     CarSpecs(mass=1326, wheelbase=2.7, steerRatio=15.38, centerToFrontRatio=0.4),  # steerRatio: 10.93 is end-to-end spec
     # Bus.radar = the hand-written 36802-TBA Bosch FINE per-track DBC (0x280 block; range in B2:B3 of the
-    # b1==0x74 header). RX-parse only; AEB stays live. (Supersedes the dormant coarse 0x2C8/0x2C9 source.)
+    # b1==0x74 header). RX-parse only. (AEB stays live ONLY under stock ACC; once op-long is enabled the
+    # 0x18DAB0F1 radar-ECU knockout in honda/interface.py init() disables factory AEB -- accepted Bosch-long
+    # behavior. Supersedes the dormant coarse 0x2C8/0x2C9 source.)
     {Bus.pt: 'honda_civic_hatchback_ex_2017_can_generated', Bus.radar: 'honda_civic_bosch_radar'},
   )
   HONDA_CIVIC_BOSCH_DIESEL = HondaBoschPlatformConfig(
