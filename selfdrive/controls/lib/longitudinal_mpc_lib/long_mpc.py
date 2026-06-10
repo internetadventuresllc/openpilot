@@ -8,6 +8,7 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.common.swaglog import cloudlog
 # WARNING: imports outside of constants will not trigger a rebuild
 from openpilot.selfdrive.modeld.constants import index_function, ModelConstants
+from openpilot.selfdrive.controls.lib.nrdr_long_tune import LongTune, LOW_SPEED_JERK_BP
 
 LEAD_T_IDXS_MODEL = np.array(ModelConstants.LEAD_T_IDXS)  # [0, 2, 4, 6, 8, 10]s
 
@@ -81,11 +82,21 @@ def get_T_FOLLOW(personality=log.LongitudinalPersonality.standard):
   else:
     raise NotImplementedError("Longitudinal personality not supported")
 
-def get_stopped_equivalence_factor(v_lead):
-  return (v_lead**2) / (2 * COMFORT_BRAKE)
+# NRDR live tune: int -> /data tune-file personality name, robust to enum reordering
+PERSONALITY_NAMES = {
+  int(log.LongitudinalPersonality.aggressive): "aggressive",
+  int(log.LongitudinalPersonality.standard): "standard",
+  int(log.LongitudinalPersonality.relaxed): "relaxed",
+}
 
-def get_safe_obstacle_distance(v_ego, t_follow):
-  return (v_ego**2) / (2 * COMFORT_BRAKE) + t_follow * v_ego + STOP_DISTANCE
+# NOTE: gen_long_ocp() bakes the default comfort_brake/stop_distance into the compiled OCP
+# cost (desired_dist_comfort). The tune-file overrides below act on the runtime obstacle
+# placement only (x_obstacle is a live solver parameter), so codegen output is unchanged.
+def get_stopped_equivalence_factor(v_lead, comfort_brake=COMFORT_BRAKE):
+  return (v_lead**2) / (2 * comfort_brake)
+
+def get_safe_obstacle_distance(v_ego, t_follow, comfort_brake=COMFORT_BRAKE, stop_distance=STOP_DISTANCE):
+  return (v_ego**2) / (2 * comfort_brake) + t_follow * v_ego + stop_distance
 
 def gen_long_model():
   model = AcadosModel()
@@ -217,6 +228,7 @@ def gen_long_ocp():
 class LongitudinalMpc:
   def __init__(self, dt=DT_MDL):
     self.dt = dt
+    self.tune = LongTune(log_fn=cloudlog.warning)  # before reset(): reset -> set_weights reads it
     self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
     self.reset()
     self.source = LongitudinalPlanSource.cruise
@@ -272,8 +284,16 @@ class LongitudinalMpc:
 
   def set_weights(self, prev_accel_constraint=True, personality=log.LongitudinalPersonality.standard):
     jerk_factor = get_jerk_factor(personality)
+    # M5: per-personality split of the single jerk factor into (a_change, j_ego) cost
+    # multipliers, live-tunable via /data/nrdr_long_tune.json; defaults reproduce stock.
+    name = PERSONALITY_NAMES.get(int(personality))
+    a_change_factor, j_ego_factor = self.tune.jerk_factors(name, (jerk_factor, jerk_factor))
+    if self.tune.low_speed_jerk_scale > 1.0:
+      low_speed_scale = float(np.interp(self.x0[1], LOW_SPEED_JERK_BP, [self.tune.low_speed_jerk_scale, 1.0]))
+      a_change_factor *= low_speed_scale
+      j_ego_factor *= low_speed_scale
     a_change_cost = A_CHANGE_COST if prev_accel_constraint else 0
-    cost_weights = [X_EGO_OBSTACLE_COST, X_EGO_COST, V_EGO_COST, A_EGO_COST, jerk_factor * a_change_cost, jerk_factor * J_EGO_COST]
+    cost_weights = [X_EGO_OBSTACLE_COST, X_EGO_COST, V_EGO_COST, A_EGO_COST, a_change_factor * a_change_cost, j_ego_factor * J_EGO_COST]
     constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, DANGER_ZONE_COST]
     self.set_cost_weights(cost_weights, constraint_cost_weights)
 
@@ -310,7 +330,9 @@ class LongitudinalMpc:
     return np.column_stack((x_lead_mpc, v_lead_mpc))
 
   def update(self, v_cruise, modelV2, radarstate, personality=log.LongitudinalPersonality.standard):
-    t_follow = get_T_FOLLOW(personality)
+    self.tune.refresh()
+    t_follow = max(0.9, get_T_FOLLOW(personality) + self.tune.t_follow_offset(PERSONALITY_NAMES.get(int(personality))))
+    comfort_brake = self.tune.comfort_brake
     v_ego = self.x0[1]
     model_leads = modelV2.leadsV3
     self.status = model_leads[0].prob > 0.5 or model_leads[1].prob > 0.5
@@ -323,8 +345,8 @@ class LongitudinalMpc:
     # To estimate a safe distance from a moving lead, we calculate how much stopping
     # distance that lead needs as a minimum. We can add that to the current distance
     # and then treat that as a stopped car/obstacle at this new distance.
-    lead_0_obstacle = lead_xv_0[:,0] + get_stopped_equivalence_factor(lead_xv_0[:,1])
-    lead_1_obstacle = lead_xv_1[:,0] + get_stopped_equivalence_factor(lead_xv_1[:,1])
+    lead_0_obstacle = lead_xv_0[:,0] + get_stopped_equivalence_factor(lead_xv_0[:,1], comfort_brake)
+    lead_1_obstacle = lead_xv_1[:,0] + get_stopped_equivalence_factor(lead_xv_1[:,1], comfort_brake)
 
     # Fake an obstacle for cruise, this ensures smooth acceleration to set speed
     # when the leads are no factor.
@@ -332,7 +354,7 @@ class LongitudinalMpc:
     # TODO does this make sense when max_a is negative?
     v_upper = v_ego + (T_IDXS * CRUISE_MAX_ACCEL * 1.05)
     v_cruise_clipped = np.clip(v_cruise * np.ones(N+1), v_lower, v_upper)
-    cruise_obstacle = np.cumsum(T_DIFFS * v_cruise_clipped) + get_safe_obstacle_distance(v_cruise_clipped, t_follow)
+    cruise_obstacle = np.cumsum(T_DIFFS * v_cruise_clipped) + get_safe_obstacle_distance(v_cruise_clipped, t_follow, comfort_brake, self.tune.stop_distance)
 
     x_obstacles = np.column_stack([lead_0_obstacle, lead_1_obstacle, cruise_obstacle])
     self.source = MPC_SOURCES[np.argmin(x_obstacles[0])]
