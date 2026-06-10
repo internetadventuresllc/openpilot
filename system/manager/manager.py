@@ -58,6 +58,11 @@ NRDR_DEFAULT_BOOL_PARAMS = {
   "SshEnabled": True,
   "ShowAdvancedControls": True,
   "LagdToggle": True,
+
+  # Honda Civic Bosch: radar 0x280 ingest + openpilot longitudinal default ON
+  # (set-if-unset, so the user can still toggle either off; NNLC stays user opt-in)
+  "HondaCivicRadarTryout": True,
+  "AlphaLongitudinalEnabled": True,
 }
 
 NRDR_DEFAULT_VALUE_PARAMS = {
