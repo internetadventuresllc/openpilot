@@ -63,8 +63,10 @@ class CarInterface(CarInterfaceBase):
       # path above (radarUnavailable=True) as the safe default. alpha-long/op-long are standard for all
       # Bosch (set above). Factory AEB does NOT stay live under op-long (accepted). Fail-safe: if car_fw
       # is empty/unknown the radar stays off.
-      if candidate == CAR.HONDA_CIVIC_BOSCH and \
-         any(fw.ecu == structs.CarParams.Ecu.fwdRadar and RADAR_FW_0X280_INGEST in fw.fwVersion for fw in car_fw):
+            if candidate == CAR.HONDA_CIVIC_BOSCH and \
+         any(fw.ecu == structs.CarParams.Ecu.fwdRadar and
+             any(fw_id in fw.fwVersion for fw_id in RADAR_FW_0X280_INGEST)
+             for fw in car_fw):
         ret.radarUnavailable = False
     else:
       ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.hondaNidec)]
