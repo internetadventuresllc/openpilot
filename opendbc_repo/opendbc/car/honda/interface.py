@@ -57,14 +57,14 @@ class CarInterface(CarInterfaceBase):
       ret.openpilotLongitudinalControl = alpha_long
       ret.pcmCruise = not ret.openpilotLongitudinalControl
 
-      # 0x280 fine-range radar ingest is GATED on the confirmed radar firmware (RADAR_FW_0X280_INGEST in
+          # 0x280 fine-range radar ingest is GATED on the confirmed radar firmware (RADAR_FW_0X280_INGEST in
       # values.py). Only that radar keeps streaming 0x280 objects under op-long, so only it is kept
       # radar-live (radarUnavailable=False); any other Civic Bosch radar fw keeps the standard HONDA_BOSCH
       # path above (radarUnavailable=True) as the safe default. alpha-long/op-long are standard for all
       # Bosch (set above). Factory AEB does NOT stay live under op-long (accepted). Fail-safe: if car_fw
       # is empty/unknown the radar stays off.
       if candidate == CAR.HONDA_CIVIC_BOSCH and \
-         any(fw.ecu == structs.CarParams.Ecu.fwdRadar and RADAR_FW_0X280_INGEST in fw.fwVersion for fw in car_fw):
+         any(fw.ecu == structs.CarParams.Ecu.fwdRadar and any(fw_id in fw.fwVersion for fw_id in RADAR_FW_0X280_INGEST) for fw in car_fw):
         ret.radarUnavailable = False
     else:
       ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.hondaNidec)]
