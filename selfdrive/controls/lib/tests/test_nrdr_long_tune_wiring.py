@@ -71,6 +71,54 @@ class TestCodegenIdentity:
     assert _SCALARS["low_speed_jerk_scale"][0] == 1.0
 
 
+class TestLeadConsumptionSchema:
+  """M1/M2/M3 tune-schema invariants: defaults are provable no-ops except m1_anchor (ON)."""
+
+  def test_defaults_are_noops_except_m1_anchor(self):
+    from openpilot.selfdrive.controls.lib.nrdr_long_tune import _LEAD_CONSUMPTION_CLAMPS as C
+    assert C["m1_anchor"][0] == 1.0          # honest KF signal -> default ON (only non-no-op)
+    assert C["m1_alead_escape"][0] == 1.0
+    assert C["m2_w_max"][0] == 0.0           # M2 off by default
+    assert C["m3_b_eff_max"][0] == 2.5       # == comfort_brake default -> M3 cannot inflate
+    # m3_b_eff_max lower clamp == comfort_brake so it can never deflate below it (one-sided)
+    assert C["m3_b_eff_max"][1] == 2.5
+    assert C["m3_alead_gate"][0] == -0.5
+
+  def test_old_reserved_block_superseded(self):
+    # obstacle_inflation_gains was repurposed into lead_consumption; the old clamp dict is gone
+    import openpilot.selfdrive.controls.lib.nrdr_long_tune as m
+    assert not hasattr(m, "_OBSTACLE_INFLATION_CLAMPS")
+
+  def test_shared_brake_gate_used_by_m2_and_m3(self):
+    # council invariant: M2 and M3 engage off ONE helper (lead_brake_gate)
+    tree = _tree(LONG_MPC)
+    assert any(isinstance(n, ast.FunctionDef) and n.name == "lead_brake_gate"
+               for n in tree.body), "lead_brake_gate helper must exist at module scope"
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "LongitudinalMpc")
+    pl = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "process_lead")
+    be = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "lead_b_eff")
+    assert "lead_brake_gate(" in ast.unparse(pl)  # M2 path
+    assert "lead_brake_gate(" in ast.unparse(be)  # M3 path
+
+  def test_m3_obstacle_uses_b_eff_not_comfort_brake(self):
+    tree = _tree(LONG_MPC)
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "LongitudinalMpc")
+    update = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "update")
+    src = ast.unparse(update)
+    assert "self.lead_b_eff(" in src
+    assert "get_stopped_equivalence_factor(lead_xv_0[:, 1], b_eff_0)" in src
+    assert "get_stopped_equivalence_factor(lead_xv_1[:, 1], b_eff_1)" in src
+
+  def test_nan_gates_present(self):
+    # every consumed KF field must pass an isfinite gate before use
+    tree = _tree(LONG_MPC)
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "LongitudinalMpc")
+    pl = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "process_lead")
+    src = ast.unparse(pl)
+    assert "math.isfinite(vLeadK)" in src
+    assert "math.isfinite(aLeadK)" in src and "math.isfinite(aLeadTau)" in src
+
+
 class TestRuntimeWiring:
   def test_update_refreshes_tune(self):
     tree = _tree(LONG_MPC)

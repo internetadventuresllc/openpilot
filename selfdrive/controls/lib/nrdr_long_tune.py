@@ -9,9 +9,33 @@ the 20 Hz planner can never read a half-written file.
 
 Consumers:
   selfdrive/controls/lib/longitudinal_mpc_lib/long_mpc.py  (comfort_brake, stop_distance,
-      t_follow_offsets, jerk_factors, low_speed_jerk_scale)
+      t_follow_offsets, jerk_factors, low_speed_jerk_scale, lead_consumption)
   selfdrive/controls/lib/longitudinal_planner.py           (a_cruise_max_scale)
-  obstacle_inflation_gains is parsed/clamped but reserved for M3 (lead-decel-aware b_eff).
+
+lead_consumption (M1/M2/M3 — long_mpc consuming radard's Kalman-filtered lead state). This
+section supersedes the old reserved obstacle_inflation_gains block (M3's b_eff lives here now).
+Every field below is a PROVABLE NO-OP at its default EXCEPT m1_anchor, which defaults ON: the
+radard KF (K1) landed, so vLeadK is the honest h=0 lead-speed signal and anchoring there is the
+correct baseline rather than the double-derived raw vLead.
+  m1_anchor          [0,1] default 1 — anchor the MPC lead-velocity trajectory at vLeadK
+                     instead of raw vLead. Default ON (honest KF signal). Set 0 to revert to
+                     stock raw-vLead anchoring. On radarless leads vLeadK==vLead so it is a
+                     no-op there regardless.
+  m1_alead_escape    [0.5, 2.0] default 1.0 — |aLeadK| escape hatch: above this the anchor
+                     blends back toward raw vLead (during hard transients the KF speed can lag,
+                     so trust the raw double-derivation more).
+  m2_w_max           [0.0, 1.0] default 0.0 (M2 OFF) — peak weight of the aLeadK*aLeadTau
+                     exponential-decay velocity extrapolation blended into v_lead_traj. 0 keeps
+                     the trajectory shape purely model-derived (stock).
+  m2_alead_deadband  [0.3, 1.0] default 0.5 — |aLeadK| below this contributes no M2 ramp.
+  m2_drel_gate       [20, 80] default 40 — leads farther than this (m) get no M2 extrapolation
+                     (guards against long-range radar ghosts).
+  m3_b_eff_max       [2.5, 4.5] default 2.5 (M3 OFF) — max effective braking (m/s^2) used to
+                     inflate a decelerating lead's obstacle. Default 2.5 == compiled
+                     comfort_brake, so clip(b_eff, comfort_brake, 2.5) can never exceed
+                     comfort_brake => zero inflation.
+  m3_alead_gate      [-2.0, -0.3] default -0.5 — aLeadK must fall below this (m/s^2) before M3
+                     considers the lead "braking" and eligible for obstacle inflation.
 
 Field semantics (what each knob actually moves — the OCP cost keeps the compiled
 COMFORT_BRAKE=2.5 / STOP_DISTANCE=6.0 inside desired_dist_comfort; these knobs act on the
@@ -60,10 +84,16 @@ _A_CRUISE_SCALE_CLAMP = (0.5, 1.5)
 _T_FOLLOW_OFFSET_CLAMP = (-0.35, 0.5)
 _JERK_FACTOR_CLAMP = (0.2, 3.0)
 _JERK_KEYS = ("a_change", "j_ego")
-# reserved for M3 (lead-decel-aware b_eff); parsed + clamped now so tuning files round-trip
-_OBSTACLE_INFLATION_CLAMPS = {
-  "b_eff_max": (2.5, 2.5, 4.5),
-  "a_lead_gate": (-0.5, -2.0, -0.3),
+# M1/M2/M3 lead-consumption knobs (supersedes the old reserved obstacle_inflation_gains block).
+# Every entry is (default, lo, hi). Defaults are provable no-ops EXCEPT m1_anchor (default ON).
+_LEAD_CONSUMPTION_CLAMPS = {
+  "m1_anchor": (1.0, 0.0, 1.0),         # bool-ish; >=0.5 => anchor at vLeadK
+  "m1_alead_escape": (1.0, 0.5, 2.0),   # |aLeadK| above this blends back to raw vLead
+  "m2_w_max": (0.0, 0.0, 1.0),          # 0 => M2 off (no accel-extrapolation in v_lead_traj)
+  "m2_alead_deadband": (0.5, 0.3, 1.0),
+  "m2_drel_gate": (40.0, 20.0, 80.0),
+  "m3_b_eff_max": (2.5, 2.5, 4.5),      # 2.5 == comfort_brake default => M3 off (no inflation)
+  "m3_alead_gate": (-0.5, -2.0, -0.3),
 }
 
 
@@ -105,7 +135,8 @@ class LongTune:
     self.a_cruise_max_scale = (1.0,) * _A_CRUISE_SCALE_N
     self.t_follow_offsets = {}
     self._jerk_overrides = {}
-    self.obstacle_inflation_gains = {}
+    # always fully populated with defaults so consumers read scalars directly (no .get fallbacks)
+    self.lead_consumption = {k: d for k, (d, _, _) in _LEAD_CONSUMPTION_CLAMPS.items()}
     self.active = False
 
   def refresh(self):
@@ -186,17 +217,17 @@ class LongTune:
             bad.append(f"jerk_factors.{p}")
       else:
         bad.append("jerk_factors")
-    if "obstacle_inflation_gains" in data:
-      raw = data["obstacle_inflation_gains"]
+    if "lead_consumption" in data:
+      raw = data["lead_consumption"]
       if isinstance(raw, dict):
-        for k, (_, lo, hi) in _OBSTACLE_INFLATION_CLAMPS.items():
+        for k, (_, lo, hi) in _LEAD_CONSUMPTION_CLAMPS.items():
           if k in raw:
             try:
-              self.obstacle_inflation_gains[k] = _clampf(raw[k], lo, hi)
+              self.lead_consumption[k] = _clampf(raw[k], lo, hi)
             except (TypeError, ValueError):
-              bad.append(f"obstacle_inflation_gains.{k}")
+              bad.append(f"lead_consumption.{k}")
       else:
-        bad.append("obstacle_inflation_gains")
+        bad.append("lead_consumption")
 
     self.active = True
     summary = self.describe()
@@ -216,8 +247,10 @@ class LongTune:
       parts.append(f"t_follow_offsets={self.t_follow_offsets}")
     if self._jerk_overrides:
       parts.append(f"jerk_factors={self._jerk_overrides}")
-    if self.obstacle_inflation_gains:
-      parts.append(f"obstacle_inflation_gains={self.obstacle_inflation_gains}")
+    lc_changed = {k: v for k, (d, _, _) in _LEAD_CONSUMPTION_CLAMPS.items()
+                  if (v := self.lead_consumption[k]) != d}
+    if lc_changed:
+      parts.append(f"lead_consumption={lc_changed}")
     return "all-defaults" if not parts else "; ".join(parts)
 
   def _warn(self, msg):

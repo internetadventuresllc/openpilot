@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import math
 import time
 import numpy as np
 from cereal import log
@@ -60,6 +61,33 @@ STOP_DISTANCE = 6.0
 CRUISE_MIN_ACCEL = -1.2
 CRUISE_MAX_ACCEL = 2.0
 MIN_X_LEAD_FACTOR = 0.5
+
+# --- M1/M2/M3 lead-consumption constants (radard Kalman state -> MPC) ---------------------
+# All tunables route through self.tune.lead_consumption (see nrdr_long_tune.py). The constants
+# here are fixed mechanism parameters, not live knobs.
+M1_CROSSFADE_FRAMES = 5      # frames after a track-id change to crossfade vLeadK anchor in
+M2_ALEAD_LP_TAU = 0.4        # s; ~0.4 Hz low-pass on aLeadK before the M2 ramp uses it
+M2_TAU_DECAYED = 1.0         # aLeadTau below this => radard learned a sustained accel
+B_EFF_MAX_BRAKE = 4.5        # hard ceiling on inflated effective braking (m/s^2)
+M3_PERSIST_S = 0.8           # aLeadK must stay below the gate this long before inflating
+M3_ENGAGE_HYST_S = 0.3       # extra engage delay (hysteresis) once persistence is met
+M3_RELEASE_DECAY_S = 0.5     # b_eff decays to comfort_brake over this long after release
+M3_TRACK_AGE_S = 0.5         # same radarTrackId must persist this long before inflating
+M3_TAU_NORM = 1.5            # aLeadK_gated = aLeadK * (1 - aLeadTau / M3_TAU_NORM)
+
+
+def lead_brake_gate(aLeadK, aLeadTau, alead_threshold):
+  """Shared M2/M3 engagement signal off the KF accel (council invariant: one gate family).
+
+  Returns (active, aLeadK_gated) where aLeadK_gated discounts the raw KF accel by how *fresh*
+  the learned-accel filter still is (aLeadTau high => just-detected => trust less). `active` is
+  True only when the discounted decel is below alead_threshold (a negative number).
+  Non-finite inputs -> inactive, gated 0.0 (caller falls back to stock behavior).
+  """
+  if not (math.isfinite(aLeadK) and math.isfinite(aLeadTau)):
+    return False, 0.0
+  aLeadK_gated = aLeadK * (1.0 - min(max(aLeadTau, 0.0), M3_TAU_NORM) / M3_TAU_NORM)
+  return (aLeadK_gated < alead_threshold), aLeadK_gated
 
 def get_jerk_factor(personality=log.LongitudinalPersonality.standard):
   if personality==log.LongitudinalPersonality.relaxed:
@@ -264,6 +292,20 @@ class LongitudinalMpc:
     self.x0 = np.zeros(X_DIM)
     self.lead_xv_0 = np.zeros((N+1, 2))
     self.lead_xv_1 = np.zeros((N+1, 2))
+    # Per-lead-slot state for M1/M2/M3 (slot 0 == leadOne, slot 1 == leadTwo).
+    #   _m1_track_id   : last seen radarTrackId (detect track-birth/change)
+    #   _m1_birth_cnt  : frames since the current track id appeared (crossfade vLeadK in)
+    #   _m2_alead_lp   : low-pass filtered aLeadK
+    #   _m3_below_t    : seconds aLeadK_gated has stayed below the gate (persistence)
+    #   _m3_b_eff      : currently-applied effective braking (latched, decays on release)
+    #   _m3_track_age  : seconds the current radarTrackId has persisted
+    self._m1_track_id = [None, None]
+    self._m1_birth_cnt = [0, 0]
+    self._m2_alead_lp = [0.0, 0.0]
+    self._m3_track_id = [None, None]
+    self._m3_below_t = [0.0, 0.0]
+    self._m3_b_eff = [0.0, 0.0]
+    self._m3_track_age = [0.0, 0.0]
     self.set_weights()
 
   def set_cost_weights(self, cost_weights, constraint_cost_weights):
@@ -305,15 +347,84 @@ class LongitudinalMpc:
       for i in range(N+1):
         self.solver.set(i, 'x', self.x0)
 
-  def process_lead(self, model_lead, radar_lead):
+  def process_lead(self, model_lead, radar_lead, lead_idx=0):
     v_ego = self.x0[1]
     if model_lead.prob > 0.5 and radar_lead.status:
-      # Anchor at radar's trusted h=0, use model's delta for h>0. On radarless, radarState
-      # is synthesized from the model (radard.get_RadarState_from_vision), so this collapses
-      # to `x - RADAR_TO_CAMERA` and `v_ego + (model.v - model_v_ego)` — identical to the
-      # prior formula. On radar cars, real radar measurements anchor the trajectory.
-      x_lead_traj = float(radar_lead.dRel) + (np.asarray(model_lead.x, dtype=np.float64) - model_lead.x[0])
-      v_lead_traj = float(radar_lead.vLead) + (np.asarray(model_lead.v, dtype=np.float64) - model_lead.v[0])
+      lc = self.tune.lead_consumption
+      d_rel = float(radar_lead.dRel)
+      v_lead_raw = float(radar_lead.vLead)
+      model_x = np.asarray(model_lead.x, dtype=np.float64)
+      model_v = np.asarray(model_lead.v, dtype=np.float64)
+      model_x_delta = model_x - model_x[0]
+      model_v_delta = model_v - model_v[0]
+
+      # ---- M1: anchor the lead-velocity trajectory at the KF estimate vLeadK -------------
+      # vLeadK is the radard Kalman filter's h=0 lead speed (honest, not the double-derived,
+      # lagged, quantized raw vLead). On radarless leads radarState is synthesized with
+      # vLeadK==vLead (radard.get_RadarState_from_vision) so anchoring there is a provable
+      # no-op. Falls back to raw vLead when the knob is off, on any non-finite KF field, or
+      # via the |aLeadK| escape hatch (the KF speed can lag under hard transients).
+      vLeadK = float(getattr(radar_lead, "vLeadK", v_lead_raw))
+      aLeadK = float(getattr(radar_lead, "aLeadK", 0.0))
+      aLeadTau = float(getattr(radar_lead, "aLeadTau", 1.0))
+      track_id = getattr(radar_lead, "radarTrackId", -1)
+
+      # track-birth / track-change handling: a fresh radarTrackId means the KF just seeded,
+      # so its speed estimate is unsettled — use raw vLead for the first M1_CROSSFADE_FRAMES
+      # then linearly crossfade the vLeadK anchor in. Tracked per lead slot.
+      if track_id != self._m1_track_id[lead_idx]:
+        self._m1_track_id[lead_idx] = track_id
+        self._m1_birth_cnt[lead_idx] = 0
+      else:
+        self._m1_birth_cnt[lead_idx] = min(self._m1_birth_cnt[lead_idx] + 1, M1_CROSSFADE_FRAMES)
+      birth_frac = self._m1_birth_cnt[lead_idx] / float(M1_CROSSFADE_FRAMES)  # 0 at birth -> 1
+
+      kf_finite = math.isfinite(vLeadK) and math.isfinite(aLeadK) and math.isfinite(aLeadTau)
+      anchor_on = lc["m1_anchor"] >= 0.5 and kf_finite
+      if anchor_on:
+        # escape hatch: |aLeadK| above the live threshold blends raw vLead back in (0..1).
+        escape = lc["m1_alead_escape"]
+        esc_blend = min(max((abs(aLeadK) - escape) / max(escape, 1e-3), 0.0), 1.0)
+        # combined weight on vLeadK: 0 -> use raw vLead; 1 -> use vLeadK.
+        kf_weight = birth_frac * (1.0 - esc_blend)
+        anchor_v = kf_weight * vLeadK + (1.0 - kf_weight) * v_lead_raw
+      else:
+        anchor_v = v_lead_raw
+
+      # ---- M2: aLeadK*aLeadTau exponential-decay velocity extrapolation -------------------
+      # v(t) = anchor_v + model_v_delta*(1-w) + w*aLeadK_lp*tau*(1-exp(-t/tau))
+      # x(t) gets the exact integral of that accel-velocity profile (not a t^2/2 stand-in):
+      #   INT[0..t] tau*(1-exp(-s/tau)) ds = tau*(t - tau*(1-exp(-t/tau)))
+      # w ramps 0->m2_w_max only when |aLeadK_lp|>deadband, aLeadTau decayed (sustained accel),
+      # and dRel within the long-range ghost gate.
+      t = LEAD_T_IDXS_MODEL
+      w = 0.0
+      x_accel_term = np.zeros_like(t)
+      v_accel_term = np.zeros_like(t)
+      if lc["m2_w_max"] > 0.0 and kf_finite:
+        # ~0.4 Hz low-pass on aLeadK before use (per-slot state, advanced once per cycle).
+        alpha = self.dt / (M2_ALEAD_LP_TAU + self.dt)
+        self._m2_alead_lp[lead_idx] += alpha * (aLeadK - self._m2_alead_lp[lead_idx])
+        aLeadK_lp = self._m2_alead_lp[lead_idx]
+        # Shared gate (council invariant: M2 & M3 use one helper). The |aLeadK|>deadband
+        # condition is the gate's `active` flag with threshold -deadband; M2 also extrapolates
+        # accelerating leads, so accept either sign past the deadband.
+        brake_active, _ = lead_brake_gate(aLeadK_lp, aLeadTau, -lc["m2_alead_deadband"])
+        deadband_ok = brake_active or aLeadK_lp > lc["m2_alead_deadband"]
+        tau_ok = aLeadTau < M2_TAU_DECAYED
+        drel_ok = d_rel < lc["m2_drel_gate"]
+        if deadband_ok and tau_ok and drel_ok:
+          w = lc["m2_w_max"]
+          tau = max(aLeadTau, 1e-3)
+          decay = 1.0 - np.exp(-t / tau)
+          v_accel_term = aLeadK_lp * tau * decay
+          x_accel_term = aLeadK_lp * tau * (t - tau * decay)
+      else:
+        # keep the filter primed even when M2 is off so it has no engage transient.
+        self._m2_alead_lp[lead_idx] = aLeadK if kf_finite else 0.0
+
+      v_lead_traj = anchor_v + model_v_delta * (1.0 - w) + w * v_accel_term
+      x_lead_traj = d_rel + model_x_delta * (1.0 - w) + w * x_accel_term
     else:
       # Fake a fast lead so MPC stays in the same mode.
       x_lead_traj = 50.0 + (v_ego + 10.0) * LEAD_T_IDXS_MODEL
@@ -329,6 +440,61 @@ class LongitudinalMpc:
     v_lead_mpc = np.interp(T_IDXS, LEAD_T_IDXS_MODEL, v_lead_traj)
     return np.column_stack((x_lead_mpc, v_lead_mpc))
 
+  def lead_b_eff(self, radar_lead, comfort_brake, lead_idx):
+    """M3: lead-decel-aware effective braking for the obstacle inflation (one-sided).
+
+    Stock uses comfort_brake for every lead's stopping distance. When the KF says a tracked
+    lead is braking harder than that, inflate the obstacle by using a larger b_eff so we react
+    earlier. Returns b_eff in [comfort_brake, m3_b_eff_max(<=4.5)] — never below comfort_brake,
+    so the worst case is slightly conservative. Pure pre-processing; the compiled OCP only ever
+    sees x_obstacle. Stateful per lead slot (persistence + engage hysteresis + release decay +
+    track-age gate), advanced once per 20 Hz cycle.
+    """
+    lc = self.tune.lead_consumption
+    b_eff_max = lc["m3_b_eff_max"]
+    dt = self.dt
+    # M3 off (default) or no live radar lead -> reset slot state, no inflation.
+    if b_eff_max <= comfort_brake or not getattr(radar_lead, "status", False):
+      self._m3_below_t[lead_idx] = 0.0
+      self._m3_b_eff[lead_idx] = 0.0
+      self._m3_track_age[lead_idx] = 0.0
+      return comfort_brake
+
+    aLeadK = float(getattr(radar_lead, "aLeadK", 0.0))
+    aLeadTau = float(getattr(radar_lead, "aLeadTau", 1.0))
+    track_id = getattr(radar_lead, "radarTrackId", -1)
+
+    # track-age gate: same radarTrackId must persist M3_TRACK_AGE_S before we trust its decel.
+    if track_id == self._m3_track_id[lead_idx] and track_id not in (None, -1):
+      self._m3_track_age[lead_idx] = min(self._m3_track_age[lead_idx] + dt, 1e6)
+    else:
+      self._m3_track_id[lead_idx] = track_id
+      self._m3_track_age[lead_idx] = 0.0
+    age_ok = self._m3_track_age[lead_idx] >= M3_TRACK_AGE_S
+
+    active, aLeadK_gated = lead_brake_gate(aLeadK, aLeadTau, lc["m3_alead_gate"])
+
+    # persistence: aLeadK_gated must stay below the gate for M3_PERSIST_S + engage hysteresis.
+    if active and age_ok:
+      self._m3_below_t[lead_idx] = min(self._m3_below_t[lead_idx] + dt, 1e6)
+    else:
+      self._m3_below_t[lead_idx] = 0.0
+    engaged = self._m3_below_t[lead_idx] >= (M3_PERSIST_S + M3_ENGAGE_HYST_S)
+
+    if engaged:
+      # b_eff target from the gated decel, one-sided and capped.
+      target = min(max(comfort_brake, -aLeadK_gated), b_eff_max, B_EFF_MAX_BRAKE)
+      self._m3_b_eff[lead_idx] = max(self._m3_b_eff[lead_idx], target)
+    else:
+      # release: decay the latched b_eff back toward comfort_brake over M3_RELEASE_DECAY_S.
+      if self._m3_b_eff[lead_idx] > comfort_brake:
+        step = (b_eff_max - comfort_brake) * (dt / M3_RELEASE_DECAY_S)
+        self._m3_b_eff[lead_idx] = max(comfort_brake, self._m3_b_eff[lead_idx] - step)
+      else:
+        self._m3_b_eff[lead_idx] = 0.0
+
+    return max(comfort_brake, self._m3_b_eff[lead_idx])
+
   def update(self, v_cruise, modelV2, radarstate, personality=log.LongitudinalPersonality.standard):
     self.tune.refresh()
     t_follow = max(0.9, get_T_FOLLOW(personality) + self.tune.t_follow_offset(PERSONALITY_NAMES.get(int(personality))))
@@ -337,16 +503,20 @@ class LongitudinalMpc:
     model_leads = modelV2.leadsV3
     self.status = model_leads[0].prob > 0.5 or model_leads[1].prob > 0.5
 
-    lead_xv_0 = self.process_lead(model_leads[0], radarstate.leadOne)
-    lead_xv_1 = self.process_lead(model_leads[1], radarstate.leadTwo)
+    lead_xv_0 = self.process_lead(model_leads[0], radarstate.leadOne, 0)
+    lead_xv_1 = self.process_lead(model_leads[1], radarstate.leadTwo, 1)
     self.lead_xv_0 = lead_xv_0
     self.lead_xv_1 = lead_xv_1
 
     # To estimate a safe distance from a moving lead, we calculate how much stopping
     # distance that lead needs as a minimum. We can add that to the current distance
     # and then treat that as a stopped car/obstacle at this new distance.
-    lead_0_obstacle = lead_xv_0[:,0] + get_stopped_equivalence_factor(lead_xv_0[:,1], comfort_brake)
-    lead_1_obstacle = lead_xv_1[:,0] + get_stopped_equivalence_factor(lead_xv_1[:,1], comfort_brake)
+    # M3: when the KF says a lead is braking harder than comfort_brake, use a larger effective
+    # braking (one-sided inflation) so the stopped-equivalence pushes the obstacle nearer/earlier.
+    b_eff_0 = self.lead_b_eff(radarstate.leadOne, comfort_brake, 0)
+    b_eff_1 = self.lead_b_eff(radarstate.leadTwo, comfort_brake, 1)
+    lead_0_obstacle = lead_xv_0[:,0] + get_stopped_equivalence_factor(lead_xv_0[:,1], b_eff_0)
+    lead_1_obstacle = lead_xv_1[:,0] + get_stopped_equivalence_factor(lead_xv_1[:,1], b_eff_1)
 
     # Fake an obstacle for cruise, this ensures smooth acceleration to set speed
     # when the leads are no factor.
