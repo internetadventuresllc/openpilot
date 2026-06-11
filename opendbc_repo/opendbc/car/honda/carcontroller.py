@@ -500,6 +500,216 @@ def _write_learner_meta_atomic(car_fingerprint: str):
     pass
 
 
+# ---------------------------------------------------------------------------
+# G3 — Brake-integrator memory (nrdrbranchdebug-cra.3)
+#
+# brake_pid.reset() zeroes the integrator at every braking onset (carcontroller resets
+# whenever accel >= 0), so every brake application starts cold. G3 caches the *converged*
+# integrator value per speed bin on brake RELEASE and preloads it on the next braking
+# ENGAGEMENT, removing the "brake amnesia" lag without changing the command-path semantics.
+#
+# Unit mapping (BINDING, from PIDController + brake_pid config k_i=0.5, neg_limit=-2.0):
+#   The brake controller has k_p=0, so its output brake_addon == self.i (the integrator term),
+#   already in m/s^2 (it is summed straight into `control` and clamped to [-2.0, 0.0]).
+#   error_integral == self.i / k_i == self.i / 0.5 (units m/s^2 * s). We cache and preload the
+#   OUTPUT-unit integrator self.i directly, so "integrator units" == m/s^2 and the -0.5 cap is
+#   literally "never preload more brake than 0.5 m/s^2 of integrator": _PRELOAD_CAP = -0.5.
+# This is BOUNDED integrator state, never a learned multiplier; every cap is conservative
+# (no CMBS backstop on this car).
+# ---------------------------------------------------------------------------
+
+# Speed bins (m/s) for the brake-integrator memory. Edges define 4 bins:
+#   [0,2), [2,5), [5,10), [10,20)  (>=20 m/s never preloads — high-speed braking is rare/varied)
+_BRAKE_BIN_EDGES = (0.0, 2.0, 5.0, 10.0, 20.0)
+_BRAKE_N_BINS = len(_BRAKE_BIN_EDGES) - 1
+
+# Persisted sidecar (atomic write-temp-then-rename; NO params_keys.h key — boot-brick trap)
+BRAKE_PROFILES_PATH = "/data/honda_brake_profiles.json"
+# Bump when bin layout / semantics change so stale persisted values are discarded
+BRAKE_LEARN_VERSION = 1
+
+_BRAKE_EMA_ALPHA = 0.1          # EMA on brake RELEASE folding the converged integrator into its bin
+_BRAKE_PRELOAD_CAP = -0.5       # m/s^2: most negative preload allowed (conservative; pos side capped at 0.0)
+_BRAKE_DECAY_PER_MIN = 0.01     # whole map decays toward 0 at x0.99/min while idle
+_BRAKE_LEARNER_DT = 2 * DT_CTRL # update() runs on the frame % 2 == 0 cadence -> 0.02 s/tick
+_BRAKE_DECAY_PER_TICK = _BRAKE_DECAY_PER_MIN / 60.0 * _BRAKE_LEARNER_DT
+# Discard a braking episode whose aEgo variance exceeded this (m/s^2)^2 — noisy/transient stops
+# don't represent a stable integrator value worth caching.
+_BRAKE_AEGO_VAR_DISCARD = 0.25
+
+
+def _brake_bin_index(v_ego: float) -> int:
+  """Return the bin index for v_ego, or -1 if outside [0, top edge) / non-finite."""
+  if not math.isfinite(v_ego) or v_ego < _BRAKE_BIN_EDGES[0] or v_ego >= _BRAKE_BIN_EDGES[-1]:
+    return -1
+  for i in range(_BRAKE_N_BINS):
+    if v_ego < _BRAKE_BIN_EDGES[i + 1]:
+      return i
+  return -1
+
+
+class BrakeMemory:
+  """Per-speed-bin cache of the converged brake integrator, preloaded at braking onset.
+
+  Pure logic (no Params IO inside): the carcontroller owns load/persist. The cache holds
+  OUTPUT-unit integrator values (m/s^2, same units as brake_pid.i), each in [_PRELOAD_CAP, 0.0].
+
+  Lifecycle per call to update():
+    - braking ENGAGEMENT edge (was not braking, now braking): return the preload for the
+      current speed bin (pitch-scaled, capped). Caller injects it into brake_pid.i.
+    - braking sustained: accumulate aEgo samples for the variance discard test.
+    - braking RELEASE edge (was braking, now not): EMA-fold the final integrator into the
+      bin that was active at engagement, UNLESS the episode's aEgo variance was too high.
+    - idle: decay the whole map toward 0 at x0.99/min.
+  """
+
+  def __init__(self, bins, car_fingerprint: str):
+    # bins: iterable of _BRAKE_N_BINS floats (loaded from sidecar, already validated)
+    self.bins = [self._safe_clamp(b) for b in bins]
+    if len(self.bins) != _BRAKE_N_BINS:
+      self.bins = [0.0] * _BRAKE_N_BINS
+    self.car_fingerprint = car_fingerprint
+
+    self._was_braking = False
+    self._engage_bin = -1
+    # Online variance accumulators (Welford) over the episode's aEgo
+    self._n = 0
+    self._mean = 0.0
+    self._m2 = 0.0
+
+  @staticmethod
+  def _safe_clamp(v: float) -> float:
+    """NaN/inf guard + cache-value clamp to [_PRELOAD_CAP, 0.0]. Returns 0.0 on non-finite."""
+    if not math.isfinite(v):
+      return 0.0
+    return float(min(0.0, max(_BRAKE_PRELOAD_CAP, v)))
+
+  def _reset_episode_stats(self):
+    self._n = 0
+    self._mean = 0.0
+    self._m2 = 0.0
+
+  def _accumulate(self, a_ego: float):
+    if not math.isfinite(a_ego):
+      return
+    self._n += 1
+    delta = a_ego - self._mean
+    self._mean += delta / self._n
+    self._m2 += delta * (a_ego - self._mean)
+
+  def _episode_variance(self) -> float:
+    if self._n < 2:
+      return 0.0
+    return self._m2 / self._n
+
+  def _preload_for(self, v_ego: float, pitch: float) -> float:
+    """Pitch-scaled, capped preload for the current speed bin. 0.0 if no usable bin/value."""
+    idx = _brake_bin_index(v_ego)
+    if idx < 0:
+      return 0.0
+    base = self.bins[idx]
+    # Scale preload by current pitch: on a downhill (pitch < 0) gravity already brakes for us,
+    # so trust LESS preload; on an uphill scale toward full. sin(pitch) in [-1,1]; map the
+    # downhill side down to 0. Conservative: never amplify beyond the cached value.
+    if math.isfinite(pitch):
+      scale = float(np.clip(1.0 + math.sin(pitch), 0.0, 1.0))
+    else:
+      scale = 1.0
+    return self._safe_clamp(base * scale)
+
+  def update(self, braking: bool, integrator: float, v_ego: float, a_ego: float,
+             pitch: float) -> float:
+    """One learner tick. Returns a preload to inject into brake_pid.i on the engagement edge,
+    else 0.0 (caller only applies the value on the engagement edge). Never returns NaN."""
+    preload = 0.0
+
+    if braking and not self._was_braking:
+      # ENGAGEMENT edge
+      self._engage_bin = _brake_bin_index(v_ego)
+      self._reset_episode_stats()
+      self._accumulate(a_ego)
+      preload = self._preload_for(v_ego, pitch)
+
+    elif braking and self._was_braking:
+      # sustained braking — accumulate for the variance discard test
+      self._accumulate(a_ego)
+
+    elif (not braking) and self._was_braking:
+      # RELEASE edge — EMA-fold the converged integrator into the engagement bin, unless the
+      # episode was too noisy to trust.
+      if self._engage_bin >= 0 and math.isfinite(integrator):
+        if self._episode_variance() <= _BRAKE_AEGO_VAR_DISCARD:
+          final = self._safe_clamp(integrator)
+          old = self.bins[self._engage_bin]
+          self.bins[self._engage_bin] = self._safe_clamp(
+            (1.0 - _BRAKE_EMA_ALPHA) * old + _BRAKE_EMA_ALPHA * final
+          )
+      self._engage_bin = -1
+      self._reset_episode_stats()
+
+    else:
+      # idle (not braking) — decay the whole map toward 0
+      for i in range(_BRAKE_N_BINS):
+        b = self.bins[i]
+        if b < 0.0:
+          self.bins[i] = min(0.0, b + _BRAKE_DECAY_PER_TICK * -_BRAKE_PRELOAD_CAP)
+        elif b > 0.0:
+          self.bins[i] = max(0.0, b - _BRAKE_DECAY_PER_TICK * -_BRAKE_PRELOAD_CAP)
+
+    self._was_braking = braking
+
+    if not math.isfinite(preload):
+      return 0.0
+    return preload
+
+
+def _load_brake_profiles(car_fingerprint: str):
+  """Load persisted brake-memory bins from BRAKE_PROFILES_PATH, verifying fingerprint +
+  BRAKE_LEARN_VERSION (G4 sidecar pattern). Returns a list of _BRAKE_N_BINS floats; all-zero on
+  any mismatch/error/corruption (provable no-op == stock cold-start)."""
+  zero = [0.0] * _BRAKE_N_BINS
+  try:
+    with open(BRAKE_PROFILES_PATH, "r", encoding="utf-8") as f:
+      data = json.load(f)
+    if not isinstance(data, dict):
+      return zero
+    if data.get("car_fingerprint") != car_fingerprint:
+      return zero
+    if data.get("learn_version") != BRAKE_LEARN_VERSION:
+      return zero
+    bins = data.get("bins")
+    if not isinstance(bins, list) or len(bins) != _BRAKE_N_BINS:
+      return zero
+    out = []
+    for b in bins:
+      fb = float(b)
+      if not math.isfinite(fb):
+        return zero
+      out.append(float(min(0.0, max(_BRAKE_PRELOAD_CAP, fb))))
+    return out
+  except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+    return zero
+
+
+def _write_brake_profiles_atomic(car_fingerprint: str, bins):
+  """Atomic write-temp-then-rename of the brake-memory sidecar. No-ops on read-only /data."""
+  try:
+    payload = {
+      "car_fingerprint": car_fingerprint,
+      "learn_version": BRAKE_LEARN_VERSION,
+      "bins": [float(b) for b in bins],
+    }
+    tmp = BRAKE_PROFILES_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+      json.dump(payload, f, indent=2, sort_keys=True)
+      f.write("\n")
+      f.flush()
+      os.fsync(f.fileno())
+    os.replace(tmp, BRAKE_PROFILES_PATH)
+  except OSError:
+    pass
+
+
 class HondaParamWriter:
   def __init__(self):
     self._params = Params()
@@ -574,6 +784,10 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
                                    neg_limit=-2.0,
                                    rate=50)
     self.brake_pid.reset()
+
+    # G3 brake-integrator memory: load per-speed-bin cache (fingerprint + version checked)
+    self._brake_memory = BrakeMemory(_load_brake_profiles(CP.carFingerprint), CP.carFingerprint)
+    self._brake_active_prev = False
 
   def _filtered_steering_pressed(self, CS, torque_cmd: float) -> bool:
     raw_pressed = bool(CS.out.steeringPressed)
@@ -794,13 +1008,32 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
         ts = self.frame * DT_CTRL
 
         if self.CP.carFingerprint in HONDA_BOSCH:
-          if (accel < 0) and (CS.out.vEgo > 1e-3):
+          brake_active = (accel < 0) and (CS.out.vEgo > 1e-3)
+
+          # G3 brake-integrator memory tick (same 2-frame cadence as the brake controller).
+          # On the engagement edge it returns a bounded, pitch-scaled preload; on release it
+          # EMA-caches the converged integrator. The command-path semantics below are unchanged
+          # except that brake_pid.i is preloaded (instead of starting from a reset 0) at onset.
+          preload = self._brake_memory.update(
+            braking=brake_active,
+            integrator=float(self.brake_pid.i),
+            v_ego=CS.out.vEgo,
+            a_ego=CS.out.aEgo,
+            pitch=self.pitch,
+          )
+
+          if brake_active:
+            if not self._brake_active_prev:
+              # ENGAGEMENT edge: preload the integrator instead of leaving it at the reset 0.
+              # Bounded to [_BRAKE_PRELOAD_CAP, 0.0] inside BrakeMemory; clamp again belt-and-suspenders.
+              self.brake_pid.i = float(np.clip(preload, _BRAKE_PRELOAD_CAP, 0.0))
             brake_addon = self.brake_pid.update(error = accel - CS.out.aEgo, speed = CS.out.vEgo)
             targetaccel = min(accel,accel + brake_addon)
           else:
             self.brake_pid.reset()
             brake_addon = 0.0
             targetaccel = accel
+          self._brake_active_prev = brake_active
 
           self.accel = float(np.clip(targetaccel, self.params.BOSCH_ACCEL_MIN, self.params.BOSCH_ACCEL_MAX))
           gas_pedal_force = self.accel + wind_brake_ms2 * self._learner.windfactor + hill_brake
@@ -913,6 +1146,8 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
       })
       # Write sidecar atomically (fingerprint + LEARN_VERSION for G4 fingerprint check)
       _write_learner_meta_atomic(self.CP.carFingerprint)
+      # G3: persist the brake-integrator memory (own atomic sidecar, no params_keys.h key)
+      _write_brake_profiles_atomic(self.CP.carFingerprint, self._brake_memory.bins)
 
     self.frame += 1
     return new_actuators, can_sends

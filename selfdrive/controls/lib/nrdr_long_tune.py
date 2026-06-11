@@ -37,6 +37,25 @@ correct baseline rather than the double-derived raw vLead.
   m3_alead_gate      [-2.0, -0.3] default -0.5 — aLeadK must fall below this (m/s^2) before M3
                      considers the lead "braking" and eligible for obstacle inflation.
 
+stopping (Bundle D / L2 - longcontrol two-phase stopping shape; consumed by
+selfdrive/controls/lib/longcontrol.py). Every field is live-tunable; the hard -1.0
+minimum-hold floor is CODE (STOPPING_HARD_HOLD_FLOOR in longcontrol.py), NOT a tune field. The
+whole section is INERT above v_ego_stopping (highway bit-identity), so these knobs only move
+sub-walking-pace stop feel. Defaults are the council-shipped Bundle D shape; l2_enable defaults ON.
+  l2_enable          [0,1] default 1 - >=0.5 routes longcontrol's stopping state through the
+                     two-phase shape; <0.5 reverts to the stock monotonic ramp to stop_accel.
+  hold_accel         [-1.0, -0.3] default -0.6 - gentle Phase-A hold the ramp targets while
+                     still rolling (vEgo > phase_switch_v); removes head-bob at the stop. Also
+                     the base of the Phase-B pitch-aware floor.
+  phase_switch_v     [0.05, 0.5] default 0.15 - vEgo (m/s) below which true standstill is
+                     declared and the ramp switches from hold_accel to the pitch-aware floor.
+  proximity_scale_m  [2.0, 20.0] default 8.0 - dRel (m) at/above which the proximity rate term
+                     saturates to 1.0; below it the ramp slows proportionally. Inert (==1.0)
+                     when there is no valid lead.
+  pitch_margin       [0.0, 2.0] default 1.0 - multiplier on the grade-compensation term
+                     (-g*sin(pitch)) added to hold_accel for the Phase-B floor. 0 disables
+                     pitch awareness (floor == hold_accel, still hard-capped at -1.0).
+
 Field semantics (what each knob actually moves — the OCP cost keeps the compiled
 COMFORT_BRAKE=2.5 / STOP_DISTANCE=6.0 inside desired_dist_comfort; these knobs act on the
 runtime obstacle placement, which is a live solver parameter):
@@ -96,6 +115,18 @@ _LEAD_CONSUMPTION_CLAMPS = {
   "m3_alead_gate": (-0.5, -2.0, -0.3),
 }
 
+# Bundle D / L2 stopping-shape knobs. Every entry is (default, lo, hi). Defaults are the
+# council-shipped Bundle D shape (l2_enable ON), NOT stock — but the section is INERT above
+# v_ego_stopping, so highway behavior stays bit-identical regardless. The hard -1.0 minimum
+# hold floor is a CODE constant (longcontrol.STOPPING_HARD_HOLD_FLOOR), never a tune field.
+_STOPPING_CLAMPS = {
+  "l2_enable": (1.0, 0.0, 1.0),          # >=0.5 => two-phase shape; <0.5 => stock monotonic ramp
+  "hold_accel": (-0.6, -1.0, -0.3),      # gentle Phase-A hold; safe envelope keeps it >= -1.0
+  "phase_switch_v": (0.15, 0.05, 0.5),   # vEgo below which standstill is declared
+  "proximity_scale_m": (8.0, 2.0, 20.0), # dRel at which the proximity rate term saturates to 1.0
+  "pitch_margin": (1.0, 0.0, 2.0),       # multiplier on the grade-compensation term
+}
+
 
 def _clampf(value, lo, hi):
   v = float(value)
@@ -137,6 +168,7 @@ class LongTune:
     self._jerk_overrides = {}
     # always fully populated with defaults so consumers read scalars directly (no .get fallbacks)
     self.lead_consumption = {k: d for k, (d, _, _) in _LEAD_CONSUMPTION_CLAMPS.items()}
+    self.stopping = {k: d for k, (d, _, _) in _STOPPING_CLAMPS.items()}
     self.active = False
 
   def refresh(self):
@@ -228,6 +260,17 @@ class LongTune:
               bad.append(f"lead_consumption.{k}")
       else:
         bad.append("lead_consumption")
+    if "stopping" in data:
+      raw = data["stopping"]
+      if isinstance(raw, dict):
+        for k, (_, lo, hi) in _STOPPING_CLAMPS.items():
+          if k in raw:
+            try:
+              self.stopping[k] = _clampf(raw[k], lo, hi)
+            except (TypeError, ValueError):
+              bad.append(f"stopping.{k}")
+      else:
+        bad.append("stopping")
 
     self.active = True
     summary = self.describe()
@@ -251,6 +294,10 @@ class LongTune:
                   if (v := self.lead_consumption[k]) != d}
     if lc_changed:
       parts.append(f"lead_consumption={lc_changed}")
+    st_changed = {k: v for k, (d, _, _) in _STOPPING_CLAMPS.items()
+                  if (v := self.stopping[k]) != d}
+    if st_changed:
+      parts.append(f"stopping={st_changed}")
     return "all-defaults" if not parts else "; ".join(parts)
 
   def _warn(self, msg):
