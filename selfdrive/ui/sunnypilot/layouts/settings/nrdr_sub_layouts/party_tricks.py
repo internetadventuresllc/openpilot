@@ -46,7 +46,8 @@ class PartyTricksLayout(Widget):
 
   def _update_state(self):
     super()._update_state()
-    self._injection_test.action_item.set_enabled(True)
+    from openpilot.selfdrive.ui.ui_state import ui_state
+    self._injection_test.action_item.set_enabled(ui_state.is_offroad())
     self._alt_dashboard.action_item.set_enabled(True)
 
   def _render(self, rect):

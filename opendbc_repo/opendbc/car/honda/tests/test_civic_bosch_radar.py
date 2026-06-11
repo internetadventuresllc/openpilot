@@ -518,8 +518,11 @@ class TestCivicBoschFineSafeParity(unittest.TestCase):
     rr = self._emit(1 + gap_k, [self._f(0x280, _hdr_frame(2000, cntr=0x12))], 0x12)
     self.assertEqual(rr.points[0].vRel, 0.0)         # re-seeded -> finite 0.0 placeholder, never NaN (not a spike)
     # the cycle AFTER re-seed derives a clean, in-bounds vRel from the new baseline
+    # assert the derived value is the correct un-halved raw derived closing speed (-0.714) and is marked as measured=True
     rr = self._emit(2 + gap_k, [self._f(0x280, _hdr_frame(1990, cntr=0x13))], 0x13)
     self.assertFalse(math.isnan(rr.points[0].vRel))
+    self.assertAlmostEqual(rr.points[0].vRel, -0.714, places=4)
+    self.assertTrue(rr.points[0].measured)
     self.assertLessEqual(abs(rr.points[0].vRel), BOSCH_RADAR_VREL_MAX)
 
   def test_s6_smooth_close_stable_negative_vrel(self):

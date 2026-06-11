@@ -353,8 +353,9 @@ class RadarInterface(RadarInterfaceBase):
             self.pts.pop(slot, None)
           else:
             # If we already have a prior vRel on the (surviving) point, blend; else seed with the raw est.
+            # We must verify prev_pt.measured is True to avoid blending with a 0.0 placeholder from a re-seed.
             prev_pt = self.pts.get(slot)
-            if prev_pt is not None and prev_pt.vRel == prev_pt.vRel:  # not NaN
+            if prev_pt is not None and prev_pt.measured and prev_pt.vRel == prev_pt.vRel:  # not NaN and not placeholder
               vRel = 0.5 * prev_pt.vRel + 0.5 * raw_vRel
             else:
               vRel = raw_vRel

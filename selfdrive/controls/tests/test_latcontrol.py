@@ -53,3 +53,40 @@ class TestLatControl:
     for _ in range(1000):
       _, _, lac_log = controller.update(True, CS, VM, params, False, 1, pose, False, 0.2)
     assert lac_log.saturated
+
+  def test_injection_test_safety(self):
+    car_name = HONDA.HONDA_CIVIC
+    CarInterface = interfaces[car_name]
+    CP = CarInterface.get_non_essential_params(car_name)
+    CP_SP = CarInterface.get_non_essential_params_sp(CP, car_name)
+    CI = CarInterface(CP, CP_SP)
+    sunnypilot_interfaces.setup_interfaces(CI)
+    CP_SP = convert_to_capnp(CP_SP)
+    VM = VehicleModel(CP)
+
+    controller = LatControlPID(CP.as_reader(), CP_SP.as_reader(), CI, DT_CTRL)
+
+    CS = car.CarState.new_message()
+    CS.steeringPressed = False
+    params = log.LiveParametersData.new_message()
+    lp = generate_livePose()
+    pose = Pose.from_live_pose(lp.livePose)
+
+    # 1. Flag disabled: output is normal
+    CS.vEgo = 0.0
+    controller.injection_test_enabled = False
+    out_disabled, _, _ = controller.update(True, CS, VM, params, False, 1.0, pose, False, 0.2)
+
+    # 2. Flag enabled at stationary: output is 9.99x (but capped to steer_max)
+    controller.injection_test_enabled = True
+    out_enabled_station, _, _ = controller.update(True, CS, VM, params, False, 1.0, pose, False, 0.2)
+    assert abs(out_enabled_station) <= controller.steer_max
+
+    # 3. Flag enabled but moving / over-speed (> 1.0 m/s): output multiplier is NOT applied, behaves normally
+    CS.vEgo = 30.0
+    controller.injection_test_enabled = True
+    out_moving_enabled, _, _ = controller.update(True, CS, VM, params, False, 1.0, pose, False, 0.2)
+
+    controller.injection_test_enabled = False
+    out_moving_disabled, _, _ = controller.update(True, CS, VM, params, False, 1.0, pose, False, 0.2)
+    assert abs(out_moving_enabled - out_moving_disabled) < 1e-5

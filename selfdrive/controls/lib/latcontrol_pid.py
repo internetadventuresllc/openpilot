@@ -295,7 +295,8 @@ class LatControlPID(LatControl):
       )
 
       # Party Tricks: Injection Test multiplies the PID scale by 999% (diagnostic only).
-      if self.injection_test_enabled:
+      # Restrict to stationary / ultra low speed to prevent dangerous high-speed lateral torque injection.
+      if self.injection_test_enabled and CS.vEgo < 1.0:
         output_torque *= 9.99
 
       if self.is_eps_modified:

@@ -34,7 +34,10 @@ def build(spinner: Spinner, dirty: bool = False, minimal: bool = False) -> None:
   # much memory, so retry with less parallelism
   compile_output: list[bytes] = []
   for n in (nproc, nproc/2, 1):
-    compile_output.clear()
+    if len(compile_output):
+      compile_output.append(b"")
+      compile_output.append(f"--- Retrying build with -j{int(n)} ---".encode('utf-8'))
+      compile_output.append(b"")
     scons: subprocess.Popen = subprocess.Popen(["scons", f"-j{int(n)}", "--cache-populate", *extra_args], cwd=BASEDIR, env=env, stderr=subprocess.PIPE)
     assert scons.stderr is not None
 
