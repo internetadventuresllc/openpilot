@@ -1,0 +1,157 @@
+{
+  "baseline": {
+    "total_frames": 22554,
+    "transitions": 23,
+    "worst_minute_transitions": 6,
+    "max_consecutive_flip_run": 1,
+    "time_in_mode": {
+      "acc": 882.26,
+      "blended": 245.67
+    },
+    "per_segment_transitions": [
+      [
+        0,
+        1
+      ],
+      [
+        2,
+        3
+      ],
+      [
+        3,
+        2
+      ],
+      [
+        8,
+        2
+      ],
+      [
+        10,
+        1
+      ],
+      [
+        11,
+        3
+      ],
+      [
+        13,
+        4
+      ],
+      [
+        14,
+        2
+      ],
+      [
+        17,
+        3
+      ],
+      [
+        18,
+        2
+      ]
+    ]
+  },
+  "patched": {
+    "total_frames": 22554,
+    "transitions": 23,
+    "worst_minute_transitions": 6,
+    "max_consecutive_flip_run": 1,
+    "time_in_mode": {
+      "acc": 881.11,
+      "blended": 246.83
+    },
+    "per_segment_transitions": [
+      [
+        0,
+        1
+      ],
+      [
+        2,
+        3
+      ],
+      [
+        3,
+        2
+      ],
+      [
+        8,
+        2
+      ],
+      [
+        10,
+        1
+      ],
+      [
+        11,
+        3
+      ],
+      [
+        13,
+        4
+      ],
+      [
+        14,
+        2
+      ],
+      [
+        17,
+        3
+      ],
+      [
+        18,
+        2
+      ]
+    ]
+  },
+  "blended_entry_latency": {
+    "baseline_blended_entries": 12,
+    "patched_matched_entries": 12,
+    "patched_missed_entries": 0,
+    "match_window_frames": 40,
+    "lag_frames_p50": 0.0,
+    "lag_frames_p95": 0.0,
+    "lag_frames_max": 0,
+    "lag_frames_mean": 0.0
+  },
+  "divergence": {
+    "frames_diverged": 23,
+    "base_acc_patch_blended": 23,
+    "base_blended_patch_acc": 0,
+    "pct_diverged": 0.102
+  },
+  "summary": {
+    "baseline_transitions": 23,
+    "patched_transitions": 23,
+    "reduction_pct": 0.0,
+    "baseline_worst_minute": 6,
+    "patched_worst_minute": 6,
+    "baseline_blended_frac": 0.2178,
+    "patched_blended_frac": 0.2188,
+    "blended_frac_shift_pct": 0.1,
+    "notes": "mpc.crash_cnt stubbed to 0 (identical for both variants); Params stubbed True; CP.radarUnavailable=False (from carParams event in route); 0 warmup frames skipped. BASELINE path explicit (NOT the on-device hardcode) = /tmp/dec_churn/dec_baseline_a6eae7b.py."
+  },
+  "frames_skipped_warmup": 0,
+  "segments_read": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18
+  ],
+  "segments_failed": [],
+  "radar_unavailable": false
+}
